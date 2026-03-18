@@ -37,42 +37,42 @@ This is the architecture contract every later phase depends on:
 
 ## Checklist
 
-- [ ] Keep `PlanetRoot` as orchestration shell only.
-- [ ] Cache scenario RID and physics space RID from `World3D`.
-- [ ] Keep chunk lifecycle out of scene children.
-- [ ] Keep projection swappable; default to spherified cube.
-- [ ] Keep scene tree small for gameplay/debug/editor needs only.
-- [ ] Record any architecture deviation in this file.
+- [x] Keep `PlanetRoot` as orchestration shell only.
+- [x] Cache scenario RID and physics space RID from `World3D`.
+- [x] Keep chunk lifecycle out of scene children.
+- [x] Keep projection swappable; default to spherified cube.
+- [x] Keep scene tree small for gameplay/debug/editor needs only.
+- [x] Record any architecture deviation in this file.
 
 ## Prerequisites
 
-- [ ] Godot and rust-godot toolchain verified.
-- [ ] Runtime root scene exists and loads.
+- [x] Godot and rust-godot toolchain verified.
+- [x] Runtime root scene exists and loads.
 
 ## Ordered Build Steps
 
-1. [ ] Implement shell scene shape exactly.
-2. [ ] Wire `PlanetRoot` ownership and RID caching path.
-3. [ ] Enforce no per-chunk terrain/collision node ownership.
-4. [ ] Verify runtime loop owns chunk lifecycle orchestration.
+1. [x] Implement shell scene shape exactly.
+2. [x] Wire `PlanetRoot` ownership and RID caching path.
+3. [x] Enforce no per-chunk terrain/collision node ownership.
+4. [x] Verify runtime loop owns chunk lifecycle orchestration.
 
 ## Validation and Test Gates
 
-- [ ] Running scene shows shell nodes only.
-- [ ] Scenario and physics space RIDs are valid and cached.
-- [ ] Server-driven test object creation works without chunk nodes.
+- [x] Running scene shows shell nodes only.
+- [x] Scenario and physics space RIDs are valid and cached.
+- [x] Server-driven test object creation works without chunk nodes.
 
 ## Definition of Done
 
-- [ ] Architecture contract is implemented, not only documented.
-- [ ] Phase checklist, validation gates, and deviations are all recorded.
+- [x] Architecture contract is implemented, not only documented.
+- [x] Phase checklist, validation gates, and deviations are all recorded.
 
 ## Test Record (Fill In)
 
-- [ ] Date:
-- [ ] Result summary:
-- [ ] Deviations from plan:
-- [ ] Follow-up actions:
+- [x] Date: 2026-03-18
+- [x] Result summary: Phase 01 scaffolding implemented with a Rust `PlanetRoot` GodotClass (`Node3D`) that caches `World3D` scenario and space RIDs, runs a shell-only tick loop, and keeps chunk identity out of scene children.
+- [x] Deviations from plan: Added tracked `.godot/extension_list.cfg` to ensure the GDExtension loads consistently so the `PlanetRoot` custom node type can be instantiated from the main scene.
+- [x] Follow-up actions: Begin Phase 02 data model implementation in Rust (`ChunkKey`, metadata maps, RID state, pools).
 
 ## References
 

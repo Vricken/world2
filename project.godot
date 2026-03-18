@@ -1,0 +1,18 @@
+; Engine configuration file.
+; Edited via automation for initial project scaffolding.
+;
+; Format:
+;   [section]
+;   param=value
+
+config_version=5
+
+[application]
+config/name="world2"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.4")
+config/icon="res://icon.svg"
+
+[rendering]
+renderer/rendering_method="forward_plus"
+renderer/rendering_method.mobile="mobile"

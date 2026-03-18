@@ -1,0 +1,8 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = "4.2"
+reloadable = true
+
+[libraries]
+macos.debug = "res://rust/target/debug/libworld2_runtime.dylib"
+macos.release = "res://rust/target/release/libworld2_runtime.dylib"

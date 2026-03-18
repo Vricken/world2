@@ -3,7 +3,9 @@
 
 ### Godot ###
 # Godot 4+ specific ignores
-.godot/
+# Keep only extension list in VCS so GDExtension classes auto-load.
+.godot/*
+!.godot/extension_list.cfg
 
 # Godot-specific ignores
 .import/

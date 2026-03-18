@@ -68,7 +68,7 @@ When in doubt, choose behavior explicitly documented by Godot and godot-rust, th
 
 ## Phase Files
 
-- [ ] [Phase 01 - Recommended Project Shape](phase-01-project-setup.md)
+- [x] [Phase 01 - Recommended Project Shape](phase-01-project-setup.md)
 - [ ] [Phase 02 - Data Model](phase-02-planet-math-foundations.md)
 - [ ] [Phase 03 - Face Basis and Chunk-Local Coordinates](phase-03-chunk-keys-and-neighbor-mapping.md)
 - [ ] [Phase 04 - Chunk Keys and Deterministic Neighbor Mapping Across Faces](phase-04-topology-seams-mesh-generation.md)

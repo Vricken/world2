@@ -1,0 +1,11 @@
+[gd_scene format=3]
+
+[node name="PlanetRoot" type="PlanetRoot"]
+
+[node name="DebugRoot" type="Node3D" parent="."]
+
+[node name="CameraAnchor" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 300, 0)
+
+[node name="MainCamera" type="Camera3D" parent="CameraAnchor"]
+current = true
