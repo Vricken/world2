@@ -1,0 +1,80 @@
+# Phase 01 - Recommended Project Shape
+
+## Goal
+
+Re-establish the full architectural intent for the runtime shell and scene shape so this phase is not checklist-only and can serve as a complete engineering reference.
+
+## Recommended Scene Layout
+
+Use this scene layout:
+
+```text
+PlanetRoot (Node3D / Rust GodotClass)
+|- DebugRoot (Node3D, optional)
+|- CameraAnchor / gameplay nodes
+`- No per-chunk terrain or collision nodes
+```
+
+This remains the core structural decision. `PlanetRoot` is a thin shell used to own the Rust planet runtime, fetch `World3D`, cache the rendering scenario RID and physics space RID, drive the update loop, and expose debug/editor controls.
+
+Terrain chunks do not exist as `MeshInstance3D` or `StaticBody3D` nodes. Their visible state lives in `RenderingServer` resources and instance RIDs attached to a scenario, while their collision state lives in `PhysicsServer3D` body and shape RIDs attached to a physics space.
+
+Godot docs explicitly support bypassing the scene tree this way, and also explicitly note this only helps when the scene system is actually the bottleneck.
+
+Use a cube-sphere with 6 face quadtrees. This keeps square chunks, deterministic per-face addressing, and practical chunked LOD without pole singularities. The production default projection should be modified/spherified cube mapping, not naive normalized-cube, while still keeping projection as a swappable strategy.
+
+The top-level Godot scene should stay intentionally small. Chunk creation, destruction, visibility, transform updates, pooling, region updates, packed staging reuse, and collision residency are all runtime responsibilities in Rust data and server RIDs.
+
+## Why This Phase Matters
+
+This is the architecture contract every later phase depends on:
+
+1. Scene tree is shell-only.
+2. Chunk identity is data-oriented, not node-oriented.
+3. Rendering is server-managed.
+4. Physics is server-managed.
+5. Runtime scaling depends on visibility, active-set discipline, and bounded churn rather than scene-node count growth.
+
+## Checklist
+
+- [ ] Keep `PlanetRoot` as orchestration shell only.
+- [ ] Cache scenario RID and physics space RID from `World3D`.
+- [ ] Keep chunk lifecycle out of scene children.
+- [ ] Keep projection swappable; default to spherified cube.
+- [ ] Keep scene tree small for gameplay/debug/editor needs only.
+- [ ] Record any architecture deviation in this file.
+
+## Prerequisites
+
+- [ ] Godot and rust-godot toolchain verified.
+- [ ] Runtime root scene exists and loads.
+
+## Ordered Build Steps
+
+1. [ ] Implement shell scene shape exactly.
+2. [ ] Wire `PlanetRoot` ownership and RID caching path.
+3. [ ] Enforce no per-chunk terrain/collision node ownership.
+4. [ ] Verify runtime loop owns chunk lifecycle orchestration.
+
+## Validation and Test Gates
+
+- [ ] Running scene shows shell nodes only.
+- [ ] Scenario and physics space RIDs are valid and cached.
+- [ ] Server-driven test object creation works without chunk nodes.
+
+## Definition of Done
+
+- [ ] Architecture contract is implemented, not only documented.
+- [ ] Phase checklist, validation gates, and deviations are all recorded.
+
+## Test Record (Fill In)
+
+- [ ] Date:
+- [ ] Result summary:
+- [ ] Deviations from plan:
+- [ ] Follow-up actions:
+
+## References
+
+- [RenderingServer - Godot docs (stable)](https://docs.godotengine.org/en/stable/classes/class_renderingserver.html)
+- [Optimization using Servers - Godot docs](https://docs.godotengine.org/en/stable/tutorials/performance/using_servers.html)
