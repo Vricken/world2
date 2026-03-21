@@ -174,48 +174,72 @@ This sixth rule is critical. gdext packed arrays are contiguous, support `resize
 
 For static planets, precompute all metadata for all LODs, but cap render-resident payload precompute with an explicit window. Default to `PAYLOAD_PRECOMPUTE_MAX_LOD = 5`. For LODs above that window, generate payloads on demand and keep residency bounded by runtime budgets and cache policy. Also precompute `SurfaceClassKey` plus stride helpers/class constants to reduce runtime allocator pressure.
 
+## Implementation Notes
+
+Implemented in:
+
+- `rust/src/runtime.rs`
+- `rust/src/lib.rs`
+
+What is now live in code:
+
+- Core runtime types for chunk identity, bounds, metrics, neighbors, payloads, pooled RID ownership, and reusable Godot-owned packed staging buffers.
+- Strict `SurfaceClassKey` compatibility rules with precomputed byte expectations derived from stride inputs.
+- `PlanetRuntime` ownership maps/sets/queues for metadata, active render/physics sets, resident payloads, RID state, render pools, and physics pools.
+- A deterministic payload residency budget helper so bounded payload caches can already be exercised in tests before later streaming phases wire in camera-driven selection.
+- `PlanetRoot` runtime ownership plus debug accessors for runtime counts and cached world RID validity.
+
+API constraints verified before implementation on 2026-03-21:
+
+- Godot `RenderingServer` docs were checked for RID ownership expectations and server-managed resource lifetime.
+- godot-rust packed-array docs/source were checked for `PackedByteArray::resize()`, `as_slice()`, `as_mut_slice()`, and copy-on-write behavior.
+
+Implementation boundary kept explicit:
+
+- This phase implements the data model and residency/pooling contracts, but planet-wide metadata population still depends on the face-basis and neighbor-mapping work in Phases 03 and 04.
+
 ## Checklist
 
-- [ ] Implement all core types shown above.
-- [ ] Keep render and physics active sets independent.
-- [ ] Key pools by strict surface compatibility.
-- [ ] Keep Godot-owned packed staging buffers reusable per class.
-- [ ] Document copy-possible FFI boundary assumptions in code/docs.
-- [ ] Precompute class stride/byte expectations during metadata build.
-- [ ] Keep payload precompute window bounded (`PAYLOAD_PRECOMPUTE_MAX_LOD = 5` default).
+- [x] Implement all core types shown above.
+- [x] Keep render and physics active sets independent.
+- [x] Key pools by strict surface compatibility.
+- [x] Keep Godot-owned packed staging buffers reusable per class.
+- [x] Document copy-possible FFI boundary assumptions in code/docs.
+- [x] Precompute class stride/byte expectations during metadata build.
+- [x] Keep payload precompute window bounded (`PAYLOAD_PRECOMPUTE_MAX_LOD = 5` default).
 
 ## Prerequisites
 
-- [ ] Phase 01 completed and architecture contract enforced.
-- [ ] Rust runtime crate has core type modules in place.
+- [x] Phase 01 completed and architecture contract enforced.
+- [x] Rust runtime crate has core type modules in place.
 
 ## Ordered Build Steps
 
-1. [ ] Implement identity, bounds, metrics, and neighbor structs.
-2. [ ] Implement payload, RID state, and pool entry structs.
-3. [ ] Implement `PlanetRuntime` ownership maps/sets/queues.
-4. [ ] Implement strict `SurfaceClassKey` compatibility fields.
-5. [ ] Implement reusable staging ownership model (`GdPackedStaging`).
+1. [x] Implement identity, bounds, metrics, and neighbor structs.
+2. [x] Implement payload, RID state, and pool entry structs.
+3. [x] Implement `PlanetRuntime` ownership maps/sets/queues.
+4. [x] Implement strict `SurfaceClassKey` compatibility fields.
+5. [x] Implement reusable staging ownership model (`GdPackedStaging`).
 
 ## Validation and Test Gates
 
-- [ ] Type construction/unit tests pass for all core structs.
-- [ ] Surface class mismatch detection test passes.
-- [ ] Runtime map ownership transitions are deterministic in mock lifecycle tests.
-- [ ] Payload residency stays bounded during aggressive camera movement tests.
+- [x] Type construction/unit tests pass for all core structs.
+- [x] Surface class mismatch detection test passes.
+- [x] Runtime map ownership transitions are deterministic in mock lifecycle tests.
+- [x] Payload residency stays bounded during aggressive camera movement tests.
 
 ## Definition of Done
 
-- [ ] Data model compiles and is integration-ready for later phases.
-- [ ] No scene-tree-primary chunk identity remains.
-- [ ] FFI boundary assumptions are explicitly documented in code/docs.
+- [x] Data model compiles and is integration-ready for later phases.
+- [x] No scene-tree-primary chunk identity remains.
+- [x] FFI boundary assumptions are explicitly documented in code/docs.
 
 ## Test Record (Fill In)
 
-- [ ] Date:
-- [ ] Result summary:
-- [ ] Compatibility edge cases validated:
-- [ ] Follow-up actions:
+- [x] Date: 2026-03-21
+- [x] Result summary: Added `rust/src/runtime.rs` with the Phase 02 runtime data model, strict surface-class compatibility checks, reusable packed staging ownership, bounded payload residency helpers, and `PlanetRoot` runtime wiring/debug accessors in `rust/src/lib.rs`.
+- [x] Compatibility edge cases validated: `cargo test` passed 6 unit tests covering chunk-key LOD bounds, strict surface-class mismatch detection, packed-region byte validation, deterministic runtime ownership transitions, payload precompute-window bounds, and bounded payload residency under mock camera churn.
+- [x] Follow-up actions: Use the Phase 02 data model in Phase 03 face-basis and chunk-local-coordinate work, then fill `ChunkMeta`/neighbor data planet-wide once cross-face mapping rules are implemented.
 
 ## References
 

@@ -69,7 +69,7 @@ When in doubt, choose behavior explicitly documented by Godot and godot-rust, th
 ## Phase Files
 
 - [x] [Phase 01 - Recommended Project Shape](phase-01-project-setup.md)
-- [ ] [Phase 02 - Data Model](phase-02-planet-math-foundations.md)
+- [x] [Phase 02 - Data Model](phase-02-planet-math-foundations.md)
 - [ ] [Phase 03 - Face Basis and Chunk-Local Coordinates](phase-03-chunk-keys-and-neighbor-mapping.md)
 - [ ] [Phase 04 - Chunk Keys and Deterministic Neighbor Mapping Across Faces](phase-04-topology-seams-mesh-generation.md)
 - [ ] [Phase 05 - Visible Grid, Border Ring, and Stitch Variants](phase-05-metadata-visibility-lod-selection.md)
@@ -123,4 +123,3 @@ Some markdown filenames reflect earlier sequencing names. Treat the phase number
 - [ ] During implementation, record any important API constraints and assumptions.
 - [ ] After implementation, update the relevant local phase or design docs in the same change.
 - [ ] If code and docs diverge, prioritize bringing docs back in sync immediately.
-

@@ -1,6 +1,6 @@
 # world2
 
-Phase 01 scaffolding for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 02 foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -8,6 +8,7 @@ Phase 01 scaffolding for a Godot + Rust (godot-rust/gdext) planet runtime.
 - Runtime root scene at `scenes/main.tscn` with shell-only layout.
 - GDExtension config at `world2.gdextension`.
 - Rust extension crate at `rust/` using git dependency on `godot-rust/gdext`.
+- Phase 02 runtime data model in `rust/src/runtime.rs`, including chunk identity, payload, RID state, pool compatibility, and bounded payload residency helpers.
 - Launch and build scripts in `scripts/`.
 
 ## Prerequisites
