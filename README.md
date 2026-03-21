@@ -1,6 +1,6 @@
 # world2
 
-Phase 07 mesh-generation pipeline foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 08 server-side render and collision commit path for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -18,7 +18,9 @@ Phase 07 mesh-generation pipeline foundations for a Godot + Rust (godot-rust/gde
 - Phase 07 configurable metadata prebuild and payload policy in `rust/src/runtime.rs`, including `metadata_precompute_max_lod`, `payload_precompute_max_lod`, and default startup metadata prebuild through LOD 5 with lazy metadata fallback above that window.
 - Phase 07 scalar-field sampling and mesh derivation in `rust/src/runtime.rs`, including `35 x 35` border-ring sample grids, seam-safe cube-surface remapping across face edges, normals derived from sampled global field, tangents/UVs/colors, and stitch-mask-driven index selection.
 - Phase 07 byte-region packing and logical warm-path preparation in `rust/src/runtime.rs`, including separated vertex/attribute/index region packing for the shipped `0x1B` surface format class, logical render lifecycle commands, physics-ready collider payloads, and reusable Godot-owned `PackedByteArray` staging on the live runtime path.
-- Phase 07 runtime logging in `rust/src/lib.rs`, including per-frame sample/mesh/pack/staging/cold-vs-warm counters for headless validation.
+- Phase 08 server-side render commit path in `rust/src/runtime.rs`, including cold `RenderingServer` mesh/instance creation, warm vertex/attribute/index region updates, transform/scenario rebinding on pooled activation, strict surface-class compatibility checks, and per-class render pool watermarks.
+- Phase 08 conservative collision commit path in `rust/src/runtime.rs`, including `PhysicsServer3D` static-body residency, concave shape refresh for near-camera chunks, bounded physics pooling, and explicit RID teardown on shutdown.
+- Phase 08 runtime logging in `rust/src/lib.rs`, including per-frame cold/warm commit counts, fallback-reason counters, and render/physics pool occupancy for headless validation.
 - Headless debug scene tuning in `scenes/main.tscn`, placing the default camera outside the planet so horizon/frustum selection can be validated without editor interaction.
 - Launch and build scripts in `scripts/`.
 

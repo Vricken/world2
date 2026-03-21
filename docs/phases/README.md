@@ -75,7 +75,7 @@ When in doubt, choose behavior explicitly documented by Godot and godot-rust, th
 - [x] [Phase 05 - Visible Grid, Border Ring, and Stitch Variants](phase-05-metadata-visibility-lod-selection.md)
 - [x] [Phase 06 - Visibility Selection and LOD](phase-06-cold-render-commit-path.md)
 - [x] [Phase 07 - Mesh Generation Pipeline](phase-07-warm-pools-and-ffi-staging-path.md)
-- [ ] [Phase 08 - Server-Side Render and Collision Commit Pattern](phase-08-physics-and-asset-streaming.md)
+- [x] [Phase 08 - Server-Side Render and Collision Commit Pattern](phase-08-physics-and-asset-streaming.md)
 - [ ] [Phase 09 - Threading Model in godot-rust](phase-09-threading-precision-final-hardening.md)
 - [ ] [Phase 10 - Precision Strategy](phase-10-threading-model-godot-rust.md)
 - [ ] [Phase 11 - Seam Handling Rules](phase-11-precision-and-origin-strategy.md)

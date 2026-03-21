@@ -1,7 +1,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::{DVec2, DVec3};
-use godot::builtin::{PackedByteArray, Plane, Rid, Transform3D, Vector3};
+use godot::builtin::{
+    Array, Color, Dictionary, PackedByteArray, PackedColorArray, PackedInt32Array,
+    PackedVector2Array, PackedVector3Array, Plane, Rid, StringName, Transform3D, Variant,
+    Vector2, Vector3,
+};
+use godot::classes::physics_server_3d::{BodyMode, BodyState};
+use godot::classes::rendering_server::PrimitiveType;
+use godot::classes::{PhysicsServer3D, RenderingServer};
+use godot::meta::ToGodot;
+use godot::obj::Singleton;
 
 use crate::geometry::{
     chunk_uv_to_face_uv, cube_point_for_face, face_uv_to_signed_coords, CubeProjection,
@@ -24,6 +33,8 @@ pub const DEFAULT_RENDER_FORMAT_MASK: u64 = 0x1B;
 pub const DEFAULT_RENDER_VERTEX_STRIDE: usize = 12;
 pub const DEFAULT_RENDER_ATTRIBUTE_STRIDE: usize = 24;
 pub const DEFAULT_RENDER_INDEX_STRIDE: usize = 4;
+pub const DEFAULT_RENDER_POOL_WATERMARK_PER_CLASS: usize = 8;
+pub const DEFAULT_PHYSICS_POOL_WATERMARK: usize = 32;
 const PACKED_NORMAL_BYTES: usize = 12;
 const PACKED_UV_BYTES: usize = 8;
 const PACKED_COLOR_BYTES: usize = 4;
@@ -504,6 +515,8 @@ pub struct ChunkPayload {
     pub sample_count: usize,
     pub mesh: CpuMeshBuffers,
     pub packed_regions: Option<PackedMeshRegions>,
+    pub gd_staging: Option<GdPackedStaging>,
+    pub pooled_render_entry: Option<RenderPoolEntry>,
     pub assets: Vec<AssetInstance>,
     pub collider_vertices: Option<Vec<[f32; 3]>>,
     pub collider_indices: Option<Vec<i32>>,
@@ -529,6 +542,8 @@ impl Default for ChunkPayload {
             sample_count: 0,
             mesh: CpuMeshBuffers::default(),
             packed_regions: None,
+            gd_staging: None,
+            pooled_render_entry: None,
             assets: Vec::new(),
             collider_vertices: None,
             collider_indices: None,
@@ -619,6 +634,8 @@ pub struct RuntimeConfig {
     pub render_vertex_stride: usize,
     pub render_attribute_stride: usize,
     pub render_index_stride: usize,
+    pub render_pool_watermark_per_class: usize,
+    pub physics_pool_watermark: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -643,6 +660,8 @@ impl Default for RuntimeConfig {
             render_vertex_stride: DEFAULT_RENDER_VERTEX_STRIDE,
             render_attribute_stride: DEFAULT_RENDER_ATTRIBUTE_STRIDE,
             render_index_stride: DEFAULT_RENDER_INDEX_STRIDE,
+            render_pool_watermark_per_class: DEFAULT_RENDER_POOL_WATERMARK_PER_CLASS,
+            physics_pool_watermark: DEFAULT_PHYSICS_POOL_WATERMARK,
         }
     }
 }
@@ -731,6 +750,15 @@ pub struct SelectionFrameState {
     pub phase7_warm_current_reuse_hits: usize,
     pub phase7_warm_pool_reuse_hits: usize,
     pub phase7_cold_fallbacks: usize,
+    pub phase8_render_warm_current_commits: usize,
+    pub phase8_render_warm_pool_commits: usize,
+    pub phase8_render_cold_commits: usize,
+    pub phase8_physics_commits: usize,
+    pub phase8_fallback_missing_current_surface_class: usize,
+    pub phase8_fallback_incompatible_current_surface_class: usize,
+    pub phase8_fallback_no_compatible_pooled_surface: usize,
+    pub render_pool_entries: usize,
+    pub physics_pool_entries: usize,
 }
 
 #[derive(Debug)]
@@ -1380,7 +1408,8 @@ impl PlanetRuntime {
         let current_surface_class = self
             .rid_state
             .get(&key)
-            .and_then(|state| state.active_surface_class.clone());
+            .and_then(|state| state.render_resident.then(|| state.active_surface_class.clone()))
+            .flatten();
         let warm_path =
             self.choose_render_warm_path(current_surface_class.as_ref(), &surface_class);
         frame_state.phase7_commit_payloads += 1;
@@ -1391,15 +1420,23 @@ impl PlanetRuntime {
                 frame_state.phase7_warm_current_reuse_hits += 1;
                 RenderLifecycleCommand::WarmReuseCurrent
             }
-            RenderWarmPath::ReusePooledSurface(entry) => {
+            RenderWarmPath::ReusePooledSurface(_) => {
                 frame_state.phase7_warm_pool_reuse_hits += 1;
-                let rid_state = self.ensure_rid_state(key);
-                rid_state.mesh_rid = Some(entry.mesh_rid);
-                rid_state.render_instance_rid = Some(entry.render_instance_rid);
                 RenderLifecycleCommand::WarmReusePooled
             }
             RenderWarmPath::ColdPath(reason) => {
                 frame_state.phase7_cold_fallbacks += 1;
+                match reason {
+                    RenderFallbackReason::MissingCurrentSurfaceClass => {
+                        frame_state.phase8_fallback_missing_current_surface_class += 1;
+                    }
+                    RenderFallbackReason::IncompatibleCurrentSurfaceClass(_) => {
+                        frame_state.phase8_fallback_incompatible_current_surface_class += 1;
+                    }
+                    RenderFallbackReason::NoCompatiblePooledSurface => {
+                        frame_state.phase8_fallback_no_compatible_pooled_surface += 1;
+                    }
+                }
                 RenderLifecycleCommand::ColdCreate(reason.clone())
             }
         };
@@ -1424,18 +1461,20 @@ impl PlanetRuntime {
             sample_count: samples.len(),
             mesh,
             packed_regions: Some(packed_regions),
+            gd_staging: staging,
+            pooled_render_entry: match warm_path {
+                RenderWarmPath::ReusePooledSurface(entry) => Some(entry),
+                _ => None,
+            },
             assets: Vec::new(),
             collider_vertices: None,
             collider_indices: None,
             render_transform: Transform3D::IDENTITY,
             render_lifecycle,
         };
-        self.resident_payloads.insert(key, payload);
-
-        let rid_state = self.ensure_rid_state(key);
-        rid_state.active_surface_class = Some(surface_class.clone());
-        rid_state.pooled_surface_class = Some(surface_class);
-        rid_state.gd_staging = staging;
+        if let Some(previous_payload) = self.resident_payloads.insert(key, payload) {
+            self.reclaim_payload_resources(previous_payload);
+        }
 
         Ok(upload_bytes)
     }
@@ -1507,7 +1546,7 @@ impl PlanetRuntime {
                 continue;
             }
 
-            self.apply_commit_op(op);
+            self.apply_commit_op(op, frame_state);
             committed += 1;
             upload_bytes_committed += op.upload_bytes;
         }
@@ -1529,6 +1568,8 @@ impl PlanetRuntime {
             .copied()
             .max()
             .unwrap_or(0);
+        frame_state.render_pool_entries = self.render_pool_entry_count();
+        frame_state.physics_pool_entries = self.physics_pool.len();
 
         Ok(())
     }
@@ -1641,28 +1682,417 @@ impl PlanetRuntime {
         Ok(ops)
     }
 
-    fn apply_commit_op(&mut self, op: CommitOp) {
+    fn apply_commit_op(&mut self, op: CommitOp, frame_state: &mut SelectionFrameState) {
         match op.kind {
             CommitOpKind::ActivateRender => {
+                self.commit_render_payload(op.key, frame_state);
                 self.active_render.insert(op.key);
                 self.ensure_rid_state(op.key).render_resident = true;
             }
             CommitOpKind::UpdateRender => {
+                self.commit_render_payload(op.key, frame_state);
                 self.active_render.insert(op.key);
                 self.ensure_rid_state(op.key).render_resident = true;
             }
             CommitOpKind::DeactivateRender => {
+                self.deactivate_render_commit(op.key);
                 self.active_render.remove(&op.key);
                 self.ensure_rid_state(op.key).render_resident = false;
             }
             CommitOpKind::ActivatePhysics => {
+                self.commit_physics_payload(op.key, frame_state);
                 self.active_physics.insert(op.key);
                 self.ensure_rid_state(op.key).physics_resident = true;
             }
             CommitOpKind::DeactivatePhysics => {
+                self.deactivate_physics_commit(op.key);
                 self.active_physics.remove(&op.key);
                 self.ensure_rid_state(op.key).physics_resident = false;
             }
+        }
+    }
+
+    fn should_commit_to_servers(&self) -> bool {
+        self.has_valid_world_rids()
+    }
+
+    fn render_pool_entry_count(&self) -> usize {
+        self.render_pool.values().map(VecDeque::len).sum()
+    }
+
+    fn commit_render_payload(&mut self, key: ChunkKey, frame_state: &mut SelectionFrameState) {
+        let Some(payload) = self.resident_payloads.get_mut(&key) else {
+            return;
+        };
+
+        let surface_class = payload.surface_class.clone();
+        let render_transform = payload.render_transform;
+        let render_lifecycle = payload.render_lifecycle.clone();
+        let mesh = payload.mesh.clone();
+        let packed_regions = payload.packed_regions.clone();
+        let mut gd_staging = payload.gd_staging.take();
+        let pooled_render_entry = payload.pooled_render_entry.take();
+
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            match render_lifecycle {
+                RenderLifecycleCommand::WarmReuseCurrent => {
+                    let Some((mesh_rid, render_instance_rid)) = self.current_render_rids(key) else {
+                        return;
+                    };
+                    let Some(staging) =
+                        self.ensure_commit_staging(gd_staging.take(), packed_regions.as_ref(), &surface_class)
+                    else {
+                        return;
+                    };
+
+                    rendering_server.mesh_surface_update_vertex_region(
+                        mesh_rid,
+                        0,
+                        0,
+                        &staging.vertex_region,
+                    );
+                    rendering_server.mesh_surface_update_attribute_region(
+                        mesh_rid,
+                        0,
+                        0,
+                        &staging.attribute_region,
+                    );
+                    rendering_server.mesh_surface_update_index_region(
+                        mesh_rid,
+                        0,
+                        0,
+                        &staging.index_region,
+                    );
+                    rendering_server.instance_set_base(render_instance_rid, mesh_rid);
+                    rendering_server.instance_set_scenario(render_instance_rid, self.scenario_rid);
+                    rendering_server.instance_set_transform(render_instance_rid, render_transform);
+                    rendering_server.instance_set_visible(render_instance_rid, true);
+
+                    gd_staging = Some(staging);
+                    frame_state.phase8_render_warm_current_commits += 1;
+                }
+                RenderLifecycleCommand::WarmReusePooled => {
+                    let Some(entry) = pooled_render_entry else {
+                        return;
+                    };
+                    if let Some(previous_entry) = self.take_current_render_entry(key) {
+                        self.recycle_render_entry(previous_entry);
+                    }
+
+                    let Some(staging) =
+                        self.ensure_commit_staging(gd_staging.take().or(entry.gd_staging), packed_regions.as_ref(), &surface_class)
+                    else {
+                        return;
+                    };
+
+                    rendering_server.mesh_surface_update_vertex_region(
+                        entry.mesh_rid,
+                        0,
+                        0,
+                        &staging.vertex_region,
+                    );
+                    rendering_server.mesh_surface_update_attribute_region(
+                        entry.mesh_rid,
+                        0,
+                        0,
+                        &staging.attribute_region,
+                    );
+                    rendering_server.mesh_surface_update_index_region(
+                        entry.mesh_rid,
+                        0,
+                        0,
+                        &staging.index_region,
+                    );
+                    rendering_server.instance_set_base(entry.render_instance_rid, entry.mesh_rid);
+                    rendering_server.instance_set_scenario(entry.render_instance_rid, self.scenario_rid);
+                    rendering_server.instance_set_transform(entry.render_instance_rid, render_transform);
+                    rendering_server.instance_set_visible(entry.render_instance_rid, true);
+
+                    self.install_render_entry(
+                        key,
+                        entry.mesh_rid,
+                        entry.render_instance_rid,
+                        surface_class.clone(),
+                        Some(staging.clone()),
+                    );
+                    gd_staging = Some(staging);
+                    frame_state.phase8_render_warm_pool_commits += 1;
+                }
+                RenderLifecycleCommand::ColdCreate(_) => {
+                    if let Some(previous_entry) = self.take_current_render_entry(key) {
+                        self.recycle_render_entry(previous_entry);
+                    }
+
+                    let mesh_rid = rendering_server.mesh_create();
+                    let arrays = cpu_mesh_to_surface_arrays(&mesh);
+                    rendering_server.mesh_add_surface_from_arrays(
+                        mesh_rid,
+                        PrimitiveType::TRIANGLES,
+                        &arrays,
+                    );
+                    let render_instance_rid = rendering_server.instance_create();
+                    rendering_server.instance_set_base(render_instance_rid, mesh_rid);
+                    rendering_server.instance_set_scenario(render_instance_rid, self.scenario_rid);
+                    rendering_server.instance_set_transform(render_instance_rid, render_transform);
+                    rendering_server.instance_set_visible(render_instance_rid, true);
+
+                    let staging =
+                        self.ensure_commit_staging(gd_staging.take(), packed_regions.as_ref(), &surface_class);
+                    self.install_render_entry(
+                        key,
+                        mesh_rid,
+                        render_instance_rid,
+                        surface_class.clone(),
+                        staging.clone(),
+                    );
+                    gd_staging = staging;
+                    frame_state.phase8_render_cold_commits += 1;
+                }
+            }
+        } else {
+            match render_lifecycle {
+                RenderLifecycleCommand::WarmReuseCurrent => {
+                    frame_state.phase8_render_warm_current_commits += 1;
+                }
+                RenderLifecycleCommand::WarmReusePooled => {
+                    if let Some(previous_entry) = self.take_current_render_entry(key) {
+                        self.recycle_render_entry(previous_entry);
+                    }
+                    if let Some(entry) = pooled_render_entry {
+                        self.install_render_entry(
+                            key,
+                            entry.mesh_rid,
+                            entry.render_instance_rid,
+                            surface_class.clone(),
+                            gd_staging.take().or(entry.gd_staging),
+                        );
+                    }
+                    frame_state.phase8_render_warm_pool_commits += 1;
+                }
+                RenderLifecycleCommand::ColdCreate(_) => {
+                    if let Some(previous_entry) = self.take_current_render_entry(key) {
+                        self.recycle_render_entry(previous_entry);
+                    }
+                    frame_state.phase8_render_cold_commits += 1;
+                }
+            }
+        }
+
+        let rid_state = self.ensure_rid_state(key);
+        rid_state.render_resident = true;
+        rid_state.active_surface_class = Some(surface_class.clone());
+        rid_state.pooled_surface_class = Some(surface_class);
+        if rid_state.gd_staging.is_none() {
+            rid_state.gd_staging = gd_staging;
+        }
+    }
+
+    fn commit_physics_payload(&mut self, key: ChunkKey, frame_state: &mut SelectionFrameState) {
+        self.ensure_collision_payload(key);
+
+        let Some(payload) = self.resident_payloads.get(&key) else {
+            return;
+        };
+        let Some(collider_vertices) = payload.collider_vertices.clone() else {
+            return;
+        };
+        let Some(collider_indices) = payload.collider_indices.clone() else {
+            return;
+        };
+        let render_transform = payload.render_transform;
+
+        let pooled_entry = self.pop_physics_pool_entry();
+        let (physics_body_rid, physics_shape_rid) = match pooled_entry {
+            Some(entry) => (entry.physics_body_rid, entry.physics_shape_rid),
+            None => {
+                if self.should_commit_to_servers() {
+                    let mut physics_server = PhysicsServer3D::singleton();
+                    let body_rid = physics_server.body_create();
+                    physics_server.body_set_mode(body_rid, BodyMode::STATIC);
+                    let shape_rid = physics_server.concave_polygon_shape_create();
+                    (body_rid, shape_rid)
+                } else {
+                    (Rid::Invalid, Rid::Invalid)
+                }
+            }
+        };
+
+        if self.should_commit_to_servers() {
+            let collider_faces = collider_faces_from_indices(&collider_vertices, &collider_indices);
+            let mut shape_data = Dictionary::<StringName, Variant>::new();
+            shape_data.set("faces", &collider_faces.to_variant());
+            shape_data.set("backface_collision", false);
+            let mut physics_server = PhysicsServer3D::singleton();
+            physics_server.shape_set_data(physics_shape_rid, &shape_data.to_variant());
+            physics_server.body_clear_shapes(physics_body_rid);
+            physics_server.body_add_shape(physics_body_rid, physics_shape_rid);
+            physics_server.body_set_state(
+                physics_body_rid,
+                BodyState::TRANSFORM,
+                &render_transform.to_variant(),
+            );
+            physics_server.body_set_space(physics_body_rid, self.physics_space_rid);
+        }
+
+        let rid_state = self.ensure_rid_state(key);
+        rid_state.physics_body_rid = Some(physics_body_rid);
+        rid_state.physics_shape_rid = Some(physics_shape_rid);
+        rid_state.physics_resident = true;
+        frame_state.phase8_physics_commits += 1;
+    }
+
+    fn deactivate_render_commit(&mut self, key: ChunkKey) {
+        if let Some(entry) = self.take_current_render_entry(key) {
+            self.recycle_render_entry(entry);
+        }
+
+        let rid_state = self.ensure_rid_state(key);
+        rid_state.render_resident = false;
+    }
+
+    fn deactivate_physics_commit(&mut self, key: ChunkKey) {
+        if let Some(entry) = self.take_current_physics_entry(key) {
+            self.recycle_physics_entry(entry);
+        }
+
+        let rid_state = self.ensure_rid_state(key);
+        rid_state.physics_resident = false;
+    }
+
+    fn current_render_rids(&mut self, key: ChunkKey) -> Option<(Rid, Rid)> {
+        let rid_state = self.ensure_rid_state(key);
+        match (rid_state.mesh_rid, rid_state.render_instance_rid) {
+            (Some(mesh_rid), Some(render_instance_rid)) => Some((mesh_rid, render_instance_rid)),
+            _ => None,
+        }
+    }
+
+    fn take_current_render_entry(&mut self, key: ChunkKey) -> Option<RenderPoolEntry> {
+        let rid_state = self.ensure_rid_state(key);
+        let (Some(mesh_rid), Some(render_instance_rid), Some(surface_class)) = (
+            rid_state.mesh_rid,
+            rid_state.render_instance_rid,
+            rid_state.active_surface_class.clone(),
+        ) else {
+            return None;
+        };
+
+        let gd_staging = rid_state.gd_staging.take();
+        rid_state.mesh_rid = None;
+        rid_state.render_instance_rid = None;
+        rid_state.active_surface_class = None;
+        rid_state.pooled_surface_class = None;
+        rid_state.render_resident = false;
+
+        Some(RenderPoolEntry {
+            mesh_rid,
+            render_instance_rid,
+            surface_class,
+            gd_staging,
+        })
+    }
+
+    fn install_render_entry(
+        &mut self,
+        key: ChunkKey,
+        mesh_rid: Rid,
+        render_instance_rid: Rid,
+        surface_class: SurfaceClassKey,
+        gd_staging: Option<GdPackedStaging>,
+    ) {
+        let rid_state = self.ensure_rid_state(key);
+        rid_state.mesh_rid = Some(mesh_rid);
+        rid_state.render_instance_rid = Some(render_instance_rid);
+        rid_state.active_surface_class = Some(surface_class.clone());
+        rid_state.pooled_surface_class = Some(surface_class);
+        rid_state.gd_staging = gd_staging;
+        rid_state.render_resident = true;
+    }
+
+    fn recycle_render_entry(&mut self, entry: RenderPoolEntry) {
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            rendering_server.instance_set_visible(entry.render_instance_rid, false);
+        }
+
+        let entries = self
+            .render_pool
+            .entry(entry.surface_class.clone())
+            .or_default();
+        if entries.len() < self.config.render_pool_watermark_per_class {
+            entries.push_back(entry);
+        } else {
+            self.free_render_entry(entry);
+        }
+    }
+
+    fn free_render_entry(&mut self, entry: RenderPoolEntry) {
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            rendering_server.free_rid(entry.render_instance_rid);
+            rendering_server.free_rid(entry.mesh_rid);
+        }
+    }
+
+    fn take_current_physics_entry(&mut self, key: ChunkKey) -> Option<PhysicsPoolEntry> {
+        let rid_state = self.ensure_rid_state(key);
+        let (Some(physics_body_rid), Some(physics_shape_rid)) =
+            (rid_state.physics_body_rid, rid_state.physics_shape_rid)
+        else {
+            return None;
+        };
+
+        rid_state.physics_body_rid = None;
+        rid_state.physics_shape_rid = None;
+        rid_state.physics_resident = false;
+
+        Some(PhysicsPoolEntry {
+            physics_body_rid,
+            physics_shape_rid,
+        })
+    }
+
+    fn recycle_physics_entry(&mut self, entry: PhysicsPoolEntry) {
+        if self.should_commit_to_servers() {
+            let mut physics_server = PhysicsServer3D::singleton();
+            physics_server.body_set_space(entry.physics_body_rid, Rid::Invalid);
+            physics_server.body_clear_shapes(entry.physics_body_rid);
+        }
+
+        if self.physics_pool.len() < self.config.physics_pool_watermark {
+            self.physics_pool.push_back(entry);
+        } else {
+            self.free_physics_entry(entry);
+        }
+    }
+
+    fn free_physics_entry(&mut self, entry: PhysicsPoolEntry) {
+        if self.should_commit_to_servers() {
+            let mut physics_server = PhysicsServer3D::singleton();
+            physics_server.free_rid(entry.physics_body_rid);
+            physics_server.free_rid(entry.physics_shape_rid);
+        }
+    }
+
+    fn ensure_commit_staging(
+        &self,
+        staging: Option<GdPackedStaging>,
+        packed_regions: Option<&PackedMeshRegions>,
+        surface_class: &SurfaceClassKey,
+    ) -> Option<GdPackedStaging> {
+        let mut staging = staging.unwrap_or_else(|| GdPackedStaging::new_for_surface_class(surface_class));
+        if let Some(packed_regions) = packed_regions {
+            staging
+                .copy_from_regions(packed_regions, surface_class)
+                .ok()?;
+        }
+        Some(staging)
+    }
+
+    fn reclaim_payload_resources(&mut self, mut payload: ChunkPayload) {
+        if let Some(entry) = payload.pooled_render_entry.take() {
+            self.recycle_render_entry(entry);
         }
     }
 
@@ -1714,11 +2144,19 @@ impl PlanetRuntime {
     }
 
     pub fn insert_payload(&mut self, key: ChunkKey, payload: ChunkPayload) -> Option<ChunkPayload> {
-        self.resident_payloads.insert(key, payload)
+        let previous = self.resident_payloads.insert(key, payload);
+        if let Some(payload) = previous.as_ref().cloned() {
+            self.reclaim_payload_resources(payload);
+        }
+        previous
     }
 
     pub fn remove_payload(&mut self, key: &ChunkKey) -> Option<ChunkPayload> {
-        self.resident_payloads.remove(key)
+        let removed = self.resident_payloads.remove(key);
+        if let Some(payload) = removed.as_ref().cloned() {
+            self.reclaim_payload_resources(payload);
+        }
+        removed
     }
 
     pub fn enforce_payload_residency_budget(
@@ -1746,7 +2184,8 @@ impl PlanetRuntime {
                 break;
             }
 
-            if self.resident_payloads.remove(&key).is_some() {
+            if let Some(payload) = self.resident_payloads.remove(&key) {
+                self.reclaim_payload_resources(payload);
                 evicted.push(key);
                 payload_count -= 1;
             }
@@ -1829,6 +2268,75 @@ impl PlanetRuntime {
 
     pub fn pop_physics_pool_entry(&mut self) -> Option<PhysicsPoolEntry> {
         self.physics_pool.pop_front()
+    }
+
+    pub fn release_server_resources(&mut self) {
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            let mut physics_server = PhysicsServer3D::singleton();
+
+            for payload in self.resident_payloads.values_mut() {
+                if let Some(entry) = payload.pooled_render_entry.take() {
+                    rendering_server.free_rid(entry.render_instance_rid);
+                    rendering_server.free_rid(entry.mesh_rid);
+                }
+            }
+
+            for rid_state in self.rid_state.values_mut() {
+                if let Some(render_instance_rid) = rid_state.render_instance_rid.take() {
+                    rendering_server.instance_set_visible(render_instance_rid, false);
+                    rendering_server.free_rid(render_instance_rid);
+                }
+                if let Some(mesh_rid) = rid_state.mesh_rid.take() {
+                    rendering_server.free_rid(mesh_rid);
+                }
+                if let Some(physics_body_rid) = rid_state.physics_body_rid.take() {
+                    physics_server.body_set_space(physics_body_rid, Rid::Invalid);
+                    physics_server.free_rid(physics_body_rid);
+                }
+                if let Some(physics_shape_rid) = rid_state.physics_shape_rid.take() {
+                    physics_server.free_rid(physics_shape_rid);
+                }
+
+                rid_state.active_surface_class = None;
+                rid_state.pooled_surface_class = None;
+                rid_state.gd_staging = None;
+                rid_state.render_resident = false;
+                rid_state.physics_resident = false;
+            }
+
+            for (_, entries) in self.render_pool.drain() {
+                for entry in entries {
+                    rendering_server.free_rid(entry.render_instance_rid);
+                    rendering_server.free_rid(entry.mesh_rid);
+                }
+            }
+            for entry in self.physics_pool.drain(..) {
+                physics_server.body_set_space(entry.physics_body_rid, Rid::Invalid);
+                physics_server.free_rid(entry.physics_body_rid);
+                physics_server.free_rid(entry.physics_shape_rid);
+            }
+        } else {
+            for payload in self.resident_payloads.values_mut() {
+                payload.pooled_render_entry = None;
+            }
+            for rid_state in self.rid_state.values_mut() {
+                rid_state.mesh_rid = None;
+                rid_state.render_instance_rid = None;
+                rid_state.physics_body_rid = None;
+                rid_state.physics_shape_rid = None;
+                rid_state.active_surface_class = None;
+                rid_state.pooled_surface_class = None;
+                rid_state.gd_staging = None;
+                rid_state.render_resident = false;
+                rid_state.physics_resident = false;
+            }
+            self.render_pool.clear();
+            self.physics_pool.clear();
+        }
+
+        self.active_render.clear();
+        self.active_physics.clear();
     }
 
     pub fn meta_count(&self) -> usize {
@@ -1916,6 +2424,58 @@ fn distance_sort_key(distance: f64) -> u64 {
     } else {
         (distance.max(0.0) * 1_000.0) as u64
     }
+}
+
+fn cpu_mesh_to_surface_arrays(mesh: &CpuMeshBuffers) -> Array<Variant> {
+    let vertices = PackedVector3Array::from_iter(
+        mesh.positions
+            .iter()
+            .copied()
+            .map(|position| Vector3::new(position[0], position[1], position[2])),
+    );
+    let normals = PackedVector3Array::from_iter(
+        mesh.normals
+            .iter()
+            .copied()
+            .map(|normal| Vector3::new(normal[0], normal[1], normal[2])),
+    );
+    let colors = PackedColorArray::from_iter(mesh.colors.iter().copied().map(|color| {
+        Color::from_rgba(color[0], color[1], color[2], color[3])
+    }));
+    let uvs = PackedVector2Array::from_iter(
+        mesh.uvs
+            .iter()
+            .copied()
+            .map(|uv| Vector2::new(uv[0], uv[1])),
+    );
+    let indices = PackedInt32Array::from_iter(mesh.indices.iter().copied());
+
+    Array::from_iter([
+        vertices.to_variant(),
+        normals.to_variant(),
+        Variant::nil(),
+        colors.to_variant(),
+        uvs.to_variant(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        indices.to_variant(),
+    ])
+}
+
+fn collider_faces_from_indices(
+    collider_vertices: &[[f32; 3]],
+    collider_indices: &[i32],
+) -> PackedVector3Array {
+    PackedVector3Array::from_iter(collider_indices.iter().filter_map(|index| {
+        let index = usize::try_from(*index).ok()?;
+        let position = *collider_vertices.get(index)?;
+        Some(Vector3::new(position[0], position[1], position[2]))
+    }))
 }
 
 #[cfg(test)]
@@ -2369,5 +2929,106 @@ mod tests {
             .active_physics
             .iter()
             .all(|key| runtime.active_render.contains(key)));
+    }
+
+    #[test]
+    fn phase8_warm_pooled_commit_recycles_previous_render_entry() {
+        let mut runtime = PlanetRuntime::new(
+            RuntimeConfig {
+                metadata_precompute_max_lod: 0,
+                enable_godot_staging: false,
+                render_pool_watermark_per_class: 4,
+                ..RuntimeConfig::default()
+            },
+            Rid::Invalid,
+            Rid::Invalid,
+        );
+        let key = sample_key();
+        let previous_surface_class = sample_surface_class();
+        let next_surface_class =
+            SurfaceClassKey::canonical_chunk(0b0011, 3, DEFAULT_RENDER_FORMAT_MASK, 12, 24, 4)
+                .unwrap();
+        let previous_mesh_rid = Rid::Invalid;
+        let previous_instance_rid = Rid::new(101);
+        let pooled_mesh_rid = Rid::new(202);
+        let pooled_instance_rid = Rid::new(303);
+
+        runtime.install_render_entry(
+            key,
+            previous_mesh_rid,
+            previous_instance_rid,
+            previous_surface_class.clone(),
+            None,
+        );
+        runtime.resident_payloads.insert(
+            key,
+            ChunkPayload {
+                surface_class: next_surface_class.clone(),
+                pooled_render_entry: Some(RenderPoolEntry {
+                    mesh_rid: pooled_mesh_rid,
+                    render_instance_rid: pooled_instance_rid,
+                    surface_class: next_surface_class.clone(),
+                    gd_staging: None,
+                }),
+                render_lifecycle: RenderLifecycleCommand::WarmReusePooled,
+                ..sample_payload(&next_surface_class, 7)
+            },
+        );
+
+        let mut frame_state = SelectionFrameState::default();
+        runtime.commit_render_payload(key, &mut frame_state);
+
+        let rid_state = runtime.rid_state.get(&key).unwrap();
+        assert_eq!(rid_state.mesh_rid, Some(pooled_mesh_rid));
+        assert_eq!(rid_state.render_instance_rid, Some(pooled_instance_rid));
+        assert_eq!(
+            rid_state.active_surface_class.as_ref(),
+            Some(&next_surface_class)
+        );
+        assert_eq!(frame_state.phase8_render_warm_pool_commits, 1);
+
+        let pooled_previous = runtime.pop_render_pool_entry(&previous_surface_class).unwrap();
+        assert_eq!(pooled_previous.mesh_rid, previous_mesh_rid);
+        assert_eq!(pooled_previous.render_instance_rid, previous_instance_rid);
+    }
+
+    #[test]
+    fn phase8_pool_watermarks_bound_recycled_entries() {
+        let surface_class = sample_surface_class();
+        let mut runtime = PlanetRuntime::new(
+            RuntimeConfig {
+                metadata_precompute_max_lod: 0,
+                enable_godot_staging: false,
+                render_pool_watermark_per_class: 1,
+                physics_pool_watermark: 1,
+                ..RuntimeConfig::default()
+            },
+            Rid::Invalid,
+            Rid::Invalid,
+        );
+
+        runtime.recycle_render_entry(RenderPoolEntry {
+            mesh_rid: Rid::new(1),
+            render_instance_rid: Rid::new(2),
+            surface_class: surface_class.clone(),
+            gd_staging: None,
+        });
+        runtime.recycle_render_entry(RenderPoolEntry {
+            mesh_rid: Rid::new(3),
+            render_instance_rid: Rid::new(4),
+            surface_class: surface_class.clone(),
+            gd_staging: None,
+        });
+        runtime.recycle_physics_entry(PhysicsPoolEntry {
+            physics_body_rid: Rid::new(5),
+            physics_shape_rid: Rid::new(6),
+        });
+        runtime.recycle_physics_entry(PhysicsPoolEntry {
+            physics_body_rid: Rid::new(7),
+            physics_shape_rid: Rid::new(8),
+        });
+
+        assert_eq!(runtime.render_pool_entry_count(), 1);
+        assert_eq!(runtime.physics_pool.len(), 1);
     }
 }
