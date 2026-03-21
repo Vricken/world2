@@ -1,6 +1,6 @@
 # world2
 
-Phase 02 foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 04 foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -9,6 +9,8 @@ Phase 02 foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
 - GDExtension config at `world2.gdextension`.
 - Rust extension crate at `rust/` using git dependency on `godot-rust/gdext`.
 - Phase 02 runtime data model in `rust/src/runtime.rs`, including chunk identity, payload, RID state, pool compatibility, and bounded payload residency helpers.
+- Phase 03 geometry helpers in `rust/src/geometry.rs`, including deterministic face bases, chunk-local sample mapping, default spherified cube projection, and a 3D planet-space displacement field with seam continuity tests.
+- Phase 04 topology helpers in `rust/src/topology.rs`, including basis-derived cross-face edge transforms, same-LOD neighbor lookup, and runtime metadata neighbor normalization without manual face-edge tables.
 - Launch and build scripts in `scripts/`.
 
 ## Prerequisites

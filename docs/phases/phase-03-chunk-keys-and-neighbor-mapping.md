@@ -68,43 +68,76 @@ Do not evaluate terrain in 2D face UV space. The spherical signal should come fr
 
 Server-driven chunk management, pooled render state, and reusable packed staging buffers do not change this geometry domain.
 
+## Implementation Notes
+
+Implemented in:
+
+- `rust/src/geometry.rs`
+- `rust/src/lib.rs`
+
+What is now live in code:
+
+- Deterministic face-basis lookup for all 6 faces using the documented right-handed `(n, u, v)` convention.
+- Chunk-local sample mapping helpers for `(i, j) -> chunk UV -> face UV -> (s, t) -> cube point`.
+- A swappable cube projection enum with spherified cube as the default strategy and normalized-cube retained as an explicit fallback.
+- Deterministic 3D planet-space displacement sampling that operates on unit directions and base planet-space positions instead of 2D face-space noise.
+- Shared-edge continuity tests that compare border samples across every directed face-edge pair at the root LOD.
+
+API constraints verified before implementation on 2026-03-21:
+
+- Godot `World3D` docs were checked to confirm that visual scenario and physics space RIDs remain world-owned, so this phase kept chunk identity in Rust and left scene-tree shape unchanged.
+- Godot headless/server documentation was checked to confirm `--headless` is the supported way to run the local engine binary for validation without a window.
+- godot-rust built-in type docs/source were rechecked to keep the Phase 02 packed-array copy-on-write assumption explicit while Phase 03 geometry stayed entirely on the Rust side of the FFI boundary.
+
+Current epsilon policy:
+
+- Snap face-UV derived coordinates within `1e-12` of `0`, `1`, or `-1` to the exact boundary value before edge/corner comparisons.
+- Require projected unit directions to remain within `1e-12` of length `1.0` in tests.
+
+Deviation note:
+
+- The phase now uses a deterministic analytic 3D harmonic field as the default displacement signal. This preserves the intended seam-safe 3D planet-space domain without adding a separate noise crate before the later mesh-generation phases.
+
 ## Checklist
 
-- [ ] Implement deterministic face basis table for all 6 faces.
-- [ ] Keep sampling pipeline identical across faces and LODs.
-- [ ] Keep terrain signal in 3D planet-space domain.
-- [ ] Validate basis handedness and unit-direction normalization.
-- [ ] Record any epsilon policy used for edge/corner stability.
+- [x] Implement deterministic face basis table for all 6 faces.
+- [x] Keep sampling pipeline identical across faces and LODs.
+- [x] Keep terrain signal in 3D planet-space domain.
+- [x] Validate basis handedness and unit-direction normalization.
+- [x] Record epsilon policy used for edge/corner stability.
 
 ## Prerequisites
 
-- [ ] Phase 02 data model in place (`Face`, `Edge`, `ChunkKey`, metadata fields).
+- [x] Phase 02 data model in place (`Face`, `Edge`, `ChunkKey`, metadata fields).
 
 ## Ordered Build Steps
 
-1. [ ] Implement face basis table exactly.
-2. [ ] Implement local sample mapping path `(i,j) -> chunk UV -> face UV -> (s,t) -> cube point`.
-3. [ ] Implement projection call site using strategy default.
-4. [ ] Implement 3D field sampling and displacement.
+1. [x] Implement face basis table exactly.
+2. [x] Implement local sample mapping path `(i,j) -> chunk UV -> face UV -> (s,t) -> cube point`.
+3. [x] Implement projection call site using strategy default.
+4. [x] Implement 3D field sampling and displacement.
 
 ## Validation and Test Gates
 
-- [ ] Basis orthogonality and handedness assertions pass.
-- [ ] Unit direction normalization checks pass within epsilon.
-- [ ] Cross-face shared border sample continuity test passes.
+- [x] Basis orthogonality and handedness assertions pass.
+- [x] Unit direction normalization checks pass within epsilon.
+- [x] Cross-face shared border sample continuity test passes.
 
 ## Definition of Done
 
-- [ ] Sampling math is deterministic across faces and LODs.
-- [ ] 2D face-space-only noise path is not used for primary terrain signal.
+- [x] Sampling math is deterministic across faces and LODs.
+- [x] 2D face-space-only noise path is not used for primary terrain signal.
 
 ## Test Record (Fill In)
 
-- [ ] Date:
-- [ ] Result summary:
-- [ ] Seam continuity notes:
-- [ ] Follow-up actions:
+- [x] Date: 2026-03-21
+- [x] Result summary: Added `rust/src/geometry.rs` with deterministic face bases, chunk-local sample mapping helpers, a swappable cube projection enum with spherified default, and a seam-safe 3D planet-space displacement sampler. Exported the new module from `rust/src/lib.rs`.
+- [x] Seam continuity notes: `cargo test` passed shared-border continuity checks across every directed face-edge pair at root LOD using the default spherified projection and 3D displacement field.
+- [x] Follow-up actions: Reuse the phase-03 face basis and edge continuity math in Phase 04 to derive the compact cross-face neighbor transform table instead of hardcoding face-edge cases.
 
 ## References
 
 - [Math and geometry constraints in local phase docs](./README.md)
+- [World3D - Godot docs](https://docs.godotengine.org/en/4.4/classes/class_world3d.html)
+- [Compiling for macOS / headless mode - Godot docs (stable)](https://docs.godotengine.org/en/stable/engine_details/development/compiling/compiling_for_macos.html#running-a-headless-server-build)
+- [godot-rust built-in types (packed arrays)](https://godot-rust.github.io/book/godot-api/builtins.html)

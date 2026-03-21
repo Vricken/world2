@@ -1,8 +1,11 @@
+pub mod geometry;
 pub mod runtime;
+pub mod topology;
 
 use godot::classes::{INode3D, Node3D};
 use godot::prelude::*;
 use runtime::{PlanetRuntime, PAYLOAD_PRECOMPUTE_MAX_LOD};
+use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT};
 
 #[derive(GodotClass)]
 #[class(base = Node3D)]
@@ -31,8 +34,10 @@ impl INode3D for PlanetRoot {
         self.cache_world_rids();
 
         godot_print!(
-            "PlanetRoot ready. Shell-only scene active. chunks_in_scene_tree=false cached_world_rids={}",
-            self.has_cached_world_rids()
+            "PlanetRoot ready. Shell-only scene active. chunks_in_scene_tree=false cached_world_rids={} edge_xforms={} default_max_lod={}",
+            self.has_cached_world_rids(),
+            DIRECTED_EDGE_TRANSFORM_COUNT,
+            DEFAULT_MAX_LOD
         );
     }
 
@@ -95,6 +100,16 @@ impl PlanetRoot {
     #[func]
     fn payload_precompute_max_lod(&self) -> i64 {
         PAYLOAD_PRECOMPUTE_MAX_LOD as i64
+    }
+
+    #[func]
+    fn topology_default_max_lod(&self) -> i64 {
+        DEFAULT_MAX_LOD as i64
+    }
+
+    #[func]
+    fn topology_edge_transform_count(&self) -> i64 {
+        DIRECTED_EDGE_TRANSFORM_COUNT as i64
     }
 
     fn cache_world_rids(&mut self) {

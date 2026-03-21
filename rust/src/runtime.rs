@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use glam::DVec3;
 use godot::builtin::{PackedByteArray, Rid};
 
+use crate::topology::{self, TopologyError};
+
 /// Treat Rust->Godot packed-array transfer as copy-possible unless the docs
 /// explicitly guarantee a zero-copy ownership handoff for the exact API used.
 pub const PAYLOAD_PRECOMPUTE_MAX_LOD: u8 = 5;
@@ -210,6 +212,28 @@ pub struct ChunkMeta {
     pub surface_class: SurfaceClassKey,
 }
 
+impl ChunkMeta {
+    pub fn new(
+        key: ChunkKey,
+        bounds: ChunkBounds,
+        metrics: ChunkMetrics,
+        surface_class: SurfaceClassKey,
+    ) -> Result<Self, TopologyError> {
+        Ok(Self {
+            key,
+            bounds,
+            metrics,
+            neighbors: topology::same_lod_neighbors(key)?,
+            surface_class,
+        })
+    }
+
+    pub fn refresh_same_lod_neighbors(&mut self) -> Result<(), TopologyError> {
+        self.neighbors = topology::same_lod_neighbors(self.key)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CpuMeshBuffers {
     pub positions: Vec<[f32; 3]>,
@@ -413,8 +437,12 @@ impl PlanetRuntime {
         self.physics_space_rid = physics_space_rid;
     }
 
-    pub fn register_chunk_meta(&mut self, meta: ChunkMeta) -> Option<ChunkMeta> {
-        self.meta.insert(meta.key, meta)
+    pub fn register_chunk_meta(
+        &mut self,
+        mut meta: ChunkMeta,
+    ) -> Result<Option<ChunkMeta>, TopologyError> {
+        meta.refresh_same_lod_neighbors()?;
+        Ok(self.meta.insert(meta.key, meta))
     }
 
     pub fn insert_payload(&mut self, key: ChunkKey, payload: ChunkPayload) -> Option<ChunkPayload> {
@@ -542,18 +570,13 @@ mod tests {
     }
 
     fn sample_meta(key: ChunkKey, surface_class: SurfaceClassKey) -> ChunkMeta {
-        ChunkMeta {
+        ChunkMeta::new(
             key,
-            bounds: ChunkBounds::new(DVec3::new(1.0, 2.0, 3.0), 50.0, -20.0, 40.0, 80.0, 140.0),
-            metrics: ChunkMetrics::new(2.5, 42.0, 0.25),
-            neighbors: ChunkNeighbors::new([
-                ChunkKey::new(Face::Px, 2, 0, 1),
-                ChunkKey::new(Face::Px, 2, 2, 1),
-                ChunkKey::new(Face::Px, 2, 1, 0),
-                ChunkKey::new(Face::Px, 2, 1, 2),
-            ]),
+            ChunkBounds::new(DVec3::new(1.0, 2.0, 3.0), 50.0, -20.0, 40.0, 80.0, 140.0),
+            ChunkMetrics::new(2.5, 42.0, 0.25),
             surface_class,
-        }
+        )
+        .unwrap()
     }
 
     fn sample_payload(surface_class: &SurfaceClassKey, fill: u8) -> ChunkPayload {
@@ -625,7 +648,7 @@ mod tests {
         let payload = sample_payload(&surface_class, 1);
 
         let mut runtime = PlanetRuntime::default();
-        runtime.register_chunk_meta(meta);
+        runtime.register_chunk_meta(meta).unwrap();
         runtime.activate_render(key);
         runtime.activate_physics(key);
         runtime.insert_payload(key, payload);
@@ -689,5 +712,46 @@ mod tests {
                 .iter()
                 .all(|key| runtime.resident_payloads.contains_key(key)));
         }
+    }
+
+    #[test]
+    fn register_chunk_meta_recomputes_neighbors_from_phase4_topology() {
+        let key = ChunkKey::new(Face::Px, 2, 0, 0);
+        let surface_class = sample_surface_class();
+        let mut meta = ChunkMeta::new(
+            key,
+            ChunkBounds::new(DVec3::new(0.0, 0.0, 0.0), 10.0, -1.0, 1.0, 999.0, 1001.0),
+            ChunkMetrics::new(1.0, 5.0, 0.1),
+            surface_class,
+        )
+        .unwrap();
+
+        meta.neighbors = ChunkNeighbors::new([
+            ChunkKey::new(Face::Nx, 2, 0, 0),
+            ChunkKey::new(Face::Nx, 2, 0, 0),
+            ChunkKey::new(Face::Nx, 2, 0, 0),
+            ChunkKey::new(Face::Nx, 2, 0, 0),
+        ]);
+
+        let mut runtime = PlanetRuntime::default();
+        runtime.register_chunk_meta(meta).unwrap();
+
+        let stored = runtime.meta.get(&key).unwrap();
+        assert_eq!(
+            stored.neighbors.get(Edge::NegU),
+            ChunkKey::new(Face::Pz, 2, 3, 0)
+        );
+        assert_eq!(
+            stored.neighbors.get(Edge::PosU),
+            ChunkKey::new(Face::Px, 2, 1, 0)
+        );
+        assert_eq!(
+            stored.neighbors.get(Edge::NegV),
+            ChunkKey::new(Face::Ny, 2, 3, 3)
+        );
+        assert_eq!(
+            stored.neighbors.get(Edge::PosV),
+            ChunkKey::new(Face::Px, 2, 0, 1)
+        );
     }
 }
