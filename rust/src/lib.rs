@@ -1,9 +1,14 @@
 pub mod geometry;
+pub mod mesh_topology;
 pub mod runtime;
 pub mod topology;
 
 use godot::classes::{INode3D, Node3D};
 use godot::prelude::*;
+use mesh_topology::{
+    canonical_chunk_topology, SAMPLED_VERTICES_PER_EDGE, STITCH_VARIANT_COUNT,
+    VISIBLE_VERTICES_PER_EDGE,
+};
 use runtime::{PlanetRuntime, PAYLOAD_PRECOMPUTE_MAX_LOD};
 use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT};
 
@@ -34,10 +39,14 @@ impl INode3D for PlanetRoot {
         self.cache_world_rids();
 
         godot_print!(
-            "PlanetRoot ready. Shell-only scene active. chunks_in_scene_tree=false cached_world_rids={} edge_xforms={} default_max_lod={}",
+            "PlanetRoot ready. Shell-only scene active. chunks_in_scene_tree=false cached_world_rids={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={}",
             self.has_cached_world_rids(),
             DIRECTED_EDGE_TRANSFORM_COUNT,
-            DEFAULT_MAX_LOD
+            DEFAULT_MAX_LOD,
+            VISIBLE_VERTICES_PER_EDGE,
+            SAMPLED_VERTICES_PER_EDGE,
+            STITCH_VARIANT_COUNT,
+            canonical_chunk_topology().base_indices().len()
         );
     }
 
@@ -110,6 +119,26 @@ impl PlanetRoot {
     #[func]
     fn topology_edge_transform_count(&self) -> i64 {
         DIRECTED_EDGE_TRANSFORM_COUNT as i64
+    }
+
+    #[func]
+    fn topology_visible_vertices_per_edge(&self) -> i64 {
+        VISIBLE_VERTICES_PER_EDGE as i64
+    }
+
+    #[func]
+    fn topology_sampled_vertices_per_edge(&self) -> i64 {
+        SAMPLED_VERTICES_PER_EDGE as i64
+    }
+
+    #[func]
+    fn topology_stitch_variant_count(&self) -> i64 {
+        STITCH_VARIANT_COUNT as i64
+    }
+
+    #[func]
+    fn topology_base_index_count(&self) -> i64 {
+        canonical_chunk_topology().base_indices().len() as i64
     }
 
     fn cache_world_rids(&mut self) {

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use glam::DVec3;
 use godot::builtin::{PackedByteArray, Rid};
 
+use crate::mesh_topology::{self, StitchError, CANONICAL_TOPOLOGY_CLASS};
 use crate::topology::{self, TopologyError};
 
 /// Treat Rust->Godot packed-array transfer as copy-possible unless the docs
@@ -127,12 +128,16 @@ impl ChunkNeighbors {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SurfaceClassKey {
-    pub lod_class: u8,
+    pub topology_class: u16,
     pub stitch_mask: u8,
+    pub index_class: u8,
     pub material_class: u8,
     pub vertex_count: u32,
     pub index_count: u32,
     pub format_mask: u64,
+    pub vertex_stride: usize,
+    pub attribute_stride: usize,
+    pub index_stride: usize,
     pub vertex_bytes: usize,
     pub attribute_bytes: usize,
     pub index_bytes: usize,
@@ -141,8 +146,9 @@ pub struct SurfaceClassKey {
 impl SurfaceClassKey {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        lod_class: u8,
+        topology_class: u16,
         stitch_mask: u8,
+        index_class: u8,
         material_class: u8,
         vertex_count: u32,
         index_count: u32,
@@ -152,26 +158,58 @@ impl SurfaceClassKey {
         index_stride: usize,
     ) -> Self {
         Self {
-            lod_class,
+            topology_class,
             stitch_mask,
+            index_class,
             material_class,
             vertex_count,
             index_count,
             format_mask,
+            vertex_stride,
+            attribute_stride,
+            index_stride,
             vertex_bytes: vertex_stride.saturating_mul(vertex_count as usize),
             attribute_bytes: attribute_stride.saturating_mul(vertex_count as usize),
             index_bytes: index_stride.saturating_mul(index_count as usize),
         }
     }
 
+    pub fn canonical_chunk(
+        stitch_mask: u8,
+        material_class: u8,
+        format_mask: u64,
+        vertex_stride: usize,
+        attribute_stride: usize,
+        index_stride: usize,
+    ) -> Result<Self, StitchError> {
+        let topology = mesh_topology::canonical_chunk_topology();
+        let index_count = topology.index_count_for_mask(stitch_mask)?;
+
+        Ok(Self::new(
+            CANONICAL_TOPOLOGY_CLASS,
+            stitch_mask,
+            stitch_mask,
+            material_class,
+            topology.vertex_count(),
+            index_count,
+            format_mask,
+            vertex_stride,
+            attribute_stride,
+            index_stride,
+        ))
+    }
+
     pub fn compatibility_issues(&self, other: &Self) -> Vec<&'static str> {
         let mut issues = Vec::new();
 
-        if self.lod_class != other.lod_class {
-            issues.push("lod_class");
+        if self.topology_class != other.topology_class {
+            issues.push("topology_class");
         }
         if self.stitch_mask != other.stitch_mask {
             issues.push("stitch_mask");
+        }
+        if self.index_class != other.index_class {
+            issues.push("index_class");
         }
         if self.material_class != other.material_class {
             issues.push("material_class");
@@ -184,6 +222,15 @@ impl SurfaceClassKey {
         }
         if self.format_mask != other.format_mask {
             issues.push("format_mask");
+        }
+        if self.vertex_stride != other.vertex_stride {
+            issues.push("vertex_stride");
+        }
+        if self.attribute_stride != other.attribute_stride {
+            issues.push("attribute_stride");
+        }
+        if self.index_stride != other.index_stride {
+            issues.push("index_stride");
         }
         if self.vertex_bytes != other.vertex_bytes {
             issues.push("vertex_bytes");
@@ -269,6 +316,15 @@ impl PackedMeshRegions {
         &self,
         surface_class: &SurfaceClassKey,
     ) -> Result<(), &'static str> {
+        if self.vertex_stride != surface_class.vertex_stride {
+            return Err("vertex_stride");
+        }
+        if self.attribute_stride != surface_class.attribute_stride {
+            return Err("attribute_stride");
+        }
+        if self.index_stride != surface_class.index_stride {
+            return Err("index_stride");
+        }
         if self.vertex_region.len() != surface_class.vertex_bytes {
             return Err("vertex_bytes");
         }
@@ -377,13 +433,27 @@ pub struct RenderPoolEntry {
     pub mesh_rid: Rid,
     pub render_instance_rid: Rid,
     pub surface_class: SurfaceClassKey,
-    pub gd_staging: GdPackedStaging,
+    pub gd_staging: Option<GdPackedStaging>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysicsPoolEntry {
     pub physics_body_rid: Rid,
     pub physics_shape_rid: Rid,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RenderWarmPath {
+    ReuseCurrentSurface,
+    ReusePooledSurface(RenderPoolEntry),
+    ColdPath(RenderFallbackReason),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenderFallbackReason {
+    MissingCurrentSurfaceClass,
+    IncompatibleCurrentSurfaceClass(Vec<&'static str>),
+    NoCompatiblePooledSurface,
 }
 
 #[derive(Debug)]
@@ -528,6 +598,33 @@ impl PlanetRuntime {
         entry
     }
 
+    pub fn choose_render_warm_path(
+        &mut self,
+        current_surface_class: Option<&SurfaceClassKey>,
+        required_surface_class: &SurfaceClassKey,
+    ) -> RenderWarmPath {
+        if let Some(current_surface_class) = current_surface_class {
+            let issues = current_surface_class.compatibility_issues(required_surface_class);
+            if issues.is_empty() {
+                return RenderWarmPath::ReuseCurrentSurface;
+            }
+
+            if let Some(entry) = self.pop_render_pool_entry(required_surface_class) {
+                return RenderWarmPath::ReusePooledSurface(entry);
+            }
+
+            return RenderWarmPath::ColdPath(
+                RenderFallbackReason::IncompatibleCurrentSurfaceClass(issues),
+            );
+        }
+
+        if let Some(entry) = self.pop_render_pool_entry(required_surface_class) {
+            return RenderWarmPath::ReusePooledSurface(entry);
+        }
+
+        RenderWarmPath::ColdPath(RenderFallbackReason::MissingCurrentSurfaceClass)
+    }
+
     pub fn push_physics_pool_entry(&mut self, entry: PhysicsPoolEntry) {
         self.physics_pool.push_back(entry);
     }
@@ -562,7 +659,7 @@ mod tests {
     use super::*;
 
     fn sample_surface_class() -> SurfaceClassKey {
-        SurfaceClassKey::new(2, 0b0101, 3, 64, 96, 0x1F, 12, 24, 4)
+        SurfaceClassKey::canonical_chunk(0b0101, 3, 0x1F, 12, 24, 4).unwrap()
     }
 
     fn sample_key() -> ChunkKey {
@@ -608,11 +705,11 @@ mod tests {
     #[test]
     fn surface_class_mismatch_detection_is_strict() {
         let base = sample_surface_class();
-        let mismatched = SurfaceClassKey::new(2, 0b0101, 3, 64, 96, 0x1F, 16, 24, 4);
+        let mismatched = SurfaceClassKey::canonical_chunk(0b0101, 3, 0x1F, 16, 24, 4).unwrap();
 
         let issues = base.compatibility_issues(&mismatched);
 
-        assert_eq!(issues, vec!["vertex_bytes"]);
+        assert_eq!(issues, vec!["vertex_stride", "vertex_bytes"]);
         assert!(!base.is_pool_compatible_with(&mismatched));
         assert!(base.is_pool_compatible_with(&base));
     }
@@ -637,6 +734,15 @@ mod tests {
         assert_eq!(
             invalid.validate_for_surface_class(&surface_class),
             Err("vertex_bytes")
+        );
+
+        let wrong_stride = PackedMeshRegions {
+            vertex_stride: 16,
+            ..valid.clone()
+        };
+        assert_eq!(
+            wrong_stride.validate_for_surface_class(&surface_class),
+            Err("vertex_stride")
         );
     }
 
@@ -712,6 +818,39 @@ mod tests {
                 .iter()
                 .all(|key| runtime.resident_payloads.contains_key(key)));
         }
+    }
+
+    #[test]
+    fn incompatible_warm_reuse_routes_to_compatible_pool_or_cold_path() {
+        let current_surface_class = sample_surface_class();
+        let required_surface_class =
+            SurfaceClassKey::canonical_chunk(0b0011, 3, 0x1F, 12, 24, 4).unwrap();
+        let pooled_entry = RenderPoolEntry {
+            mesh_rid: Rid::Invalid,
+            render_instance_rid: Rid::Invalid,
+            gd_staging: None,
+            surface_class: required_surface_class.clone(),
+        };
+
+        let mut runtime = PlanetRuntime::default();
+        runtime.push_render_pool_entry(pooled_entry.clone());
+
+        let reused =
+            runtime.choose_render_warm_path(Some(&current_surface_class), &required_surface_class);
+        assert_eq!(reused, RenderWarmPath::ReusePooledSurface(pooled_entry));
+
+        let mut runtime = PlanetRuntime::default();
+        let cold_path =
+            runtime.choose_render_warm_path(Some(&current_surface_class), &required_surface_class);
+        assert_eq!(
+            cold_path,
+            RenderWarmPath::ColdPath(RenderFallbackReason::IncompatibleCurrentSurfaceClass(vec![
+                "stitch_mask",
+                "index_class",
+                "index_count",
+                "index_bytes"
+            ]))
+        );
     }
 
     #[test]
