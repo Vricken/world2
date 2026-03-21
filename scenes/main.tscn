@@ -5,7 +5,7 @@
 [node name="DebugRoot" type="Node3D" parent="."]
 
 [node name="CameraAnchor" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 300, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3000)
 
 [node name="MainCamera" type="Camera3D" parent="CameraAnchor"]
 current = true

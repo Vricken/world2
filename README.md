@@ -1,6 +1,6 @@
 # world2
 
-Phase 05 foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 07 mesh-generation pipeline foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -13,6 +13,13 @@ Phase 05 foundations for a Godot + Rust (godot-rust/gdext) planet runtime.
 - Phase 04 topology helpers in `rust/src/topology.rs`, including basis-derived cross-face edge transforms, same-LOD neighbor lookup, and runtime metadata neighbor normalization without manual face-edge tables.
 - Phase 05 canonical mesh topology in `rust/src/mesh_topology.rs`, including locked `32/33/35` chunk constants, precomputed base plus 16 stitch index variants, and fine-to-coarse stitch-mask derivation.
 - Phase 05 surface compatibility tightening in `rust/src/runtime.rs`, including topology/stitch/index/material/format class keys, stride-aware byte validation, and warm-path fallback routing when reuse is incompatible.
+- Phase 06 visibility and LOD selection in `rust/src/runtime.rs`, including lazy chunk-metadata caching, horizon-first visibility traversal, projected-error split/merge hysteresis, neighbor LOD delta normalization, separate render/physics active sets, and budgeted commit/upload deferral metrics.
+- Phase 06 runtime tick integration in `rust/src/lib.rs`, including active-camera frustum capture, per-frame selector execution, and headless-friendly debug counters/logging.
+- Phase 07 configurable metadata prebuild and payload policy in `rust/src/runtime.rs`, including `metadata_precompute_max_lod`, `payload_precompute_max_lod`, and default startup metadata prebuild through LOD 5 with lazy metadata fallback above that window.
+- Phase 07 scalar-field sampling and mesh derivation in `rust/src/runtime.rs`, including `35 x 35` border-ring sample grids, seam-safe cube-surface remapping across face edges, normals derived from sampled global field, tangents/UVs/colors, and stitch-mask-driven index selection.
+- Phase 07 byte-region packing and logical warm-path preparation in `rust/src/runtime.rs`, including separated vertex/attribute/index region packing for the shipped `0x1B` surface format class, logical render lifecycle commands, physics-ready collider payloads, and reusable Godot-owned `PackedByteArray` staging on the live runtime path.
+- Phase 07 runtime logging in `rust/src/lib.rs`, including per-frame sample/mesh/pack/staging/cold-vs-warm counters for headless validation.
+- Headless debug scene tuning in `scenes/main.tscn`, placing the default camera outside the planet so horizon/frustum selection can be validated without editor interaction.
 - Launch and build scripts in `scripts/`.
 
 ## Prerequisites

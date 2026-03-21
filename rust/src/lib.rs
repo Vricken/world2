@@ -9,7 +9,7 @@ use mesh_topology::{
     canonical_chunk_topology, SAMPLED_VERTICES_PER_EDGE, STITCH_VARIANT_COUNT,
     VISIBLE_VERTICES_PER_EDGE,
 };
-use runtime::{PlanetRuntime, PAYLOAD_PRECOMPUTE_MAX_LOD};
+use runtime::{CameraState, PlanetRuntime};
 use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT};
 
 #[derive(GodotClass)]
@@ -39,8 +39,11 @@ impl INode3D for PlanetRoot {
         self.cache_world_rids();
 
         godot_print!(
-            "PlanetRoot ready. Shell-only scene active. chunks_in_scene_tree=false cached_world_rids={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={}",
+            "PlanetRoot ready. Shell-only scene active. chunks_in_scene_tree=false cached_world_rids={} meta_precompute_max_lod={} payload_precompute_max_lod={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={}",
             self.has_cached_world_rids(),
+            self.runtime.metadata_precompute_max_lod(),
+            self.runtime.payload_precompute_max_lod(),
+            self.runtime.meta_count(),
             DIRECTED_EDGE_TRANSFORM_COUNT,
             DEFAULT_MAX_LOD,
             VISIBLE_VERTICES_PER_EDGE,
@@ -55,6 +58,49 @@ impl INode3D for PlanetRoot {
 
         if self.runtime_tick_count == 1 || self.runtime_tick_count % 300 == 0 {
             self.cache_world_rids();
+        }
+
+        let Some(camera_state) = self.acquire_camera_state() else {
+            if self.runtime_tick_count == 1 {
+                godot_warn!(
+                    "PlanetRoot could not find an active Camera3D; skipping Phase 07 runtime tick."
+                );
+            }
+            return;
+        };
+
+        if let Err(err) = self.runtime.step_visibility_selection(&camera_state) {
+            godot_error!("PlanetRoot Phase 07 runtime tick failed: {err:?}");
+            return;
+        }
+
+        if self.runtime_tick_count == 1 || self.runtime_tick_count % 120 == 0 {
+            let frame = self.runtime.frame_state();
+            godot_print!(
+                "PlanetRoot phase07 tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={}",
+                frame.tick,
+                self.runtime.meta_count(),
+                self.runtime.resident_payload_count(),
+                frame.desired_render_count,
+                self.runtime.active_render_count(),
+                frame.desired_physics_count,
+                self.runtime.active_physics_count(),
+                frame.horizon_survivor_count,
+                frame.frustum_survivor_count,
+                frame.neighbor_split_count,
+                frame.phase7_sampled_chunks,
+                frame.phase7_meshed_chunks,
+                frame.phase7_packed_chunks,
+                frame.phase7_staged_chunks,
+                frame.phase7_commit_payloads,
+                frame.phase7_warm_current_reuse_hits,
+                frame.phase7_warm_pool_reuse_hits,
+                frame.phase7_cold_fallbacks,
+                frame.queued_commit_ops,
+                frame.deferred_commit_ops,
+                frame.upload_bytes_deferred,
+                frame.max_deferred_starvation_frames,
+            );
         }
     }
 }
@@ -97,6 +143,26 @@ impl PlanetRoot {
     }
 
     #[func]
+    fn runtime_desired_render_count(&self) -> i64 {
+        self.runtime.desired_render_count() as i64
+    }
+
+    #[func]
+    fn runtime_desired_physics_count(&self) -> i64 {
+        self.runtime.desired_physics_count() as i64
+    }
+
+    #[func]
+    fn runtime_deferred_commit_count(&self) -> i64 {
+        self.runtime.deferred_commit_count() as i64
+    }
+
+    #[func]
+    fn runtime_deferred_upload_bytes(&self) -> i64 {
+        self.runtime.deferred_upload_bytes() as i64
+    }
+
+    #[func]
     fn runtime_resident_payload_count(&self) -> i64 {
         self.runtime.resident_payload_count() as i64
     }
@@ -107,8 +173,13 @@ impl PlanetRoot {
     }
 
     #[func]
+    fn metadata_precompute_max_lod(&self) -> i64 {
+        self.runtime.metadata_precompute_max_lod() as i64
+    }
+
+    #[func]
     fn payload_precompute_max_lod(&self) -> i64 {
-        PAYLOAD_PRECOMPUTE_MAX_LOD as i64
+        self.runtime.payload_precompute_max_lod() as i64
     }
 
     #[func]
@@ -139,6 +210,36 @@ impl PlanetRoot {
     #[func]
     fn topology_base_index_count(&self) -> i64 {
         canonical_chunk_topology().base_indices().len() as i64
+    }
+
+    fn acquire_camera_state(&self) -> Option<CameraState> {
+        let viewport = self.base().get_viewport()?;
+        let camera = viewport.get_camera_3d()?;
+        let frustum = camera.get_frustum();
+        if frustum.len() != 6 {
+            godot_warn!(
+                "PlanetRoot expected 6 frustum planes from Camera3D but received {}.",
+                frustum.len()
+            );
+            return None;
+        }
+
+        let frustum_planes = [
+            frustum.at(0),
+            frustum.at(1),
+            frustum.at(2),
+            frustum.at(3),
+            frustum.at(4),
+            frustum.at(5),
+        ];
+        let visible_rect = viewport.get_visible_rect();
+
+        Some(CameraState::from_godot(
+            camera.get_camera_transform(),
+            frustum_planes,
+            camera.get_fov(),
+            visible_rect.size.y,
+        ))
     }
 
     fn cache_world_rids(&mut self) {
