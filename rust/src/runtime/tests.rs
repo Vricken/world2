@@ -265,16 +265,25 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     let runtime = PlanetRuntime::new(config.clone(), Rid::Invalid, Rid::Invalid);
 
     assert_eq!(config.max_lod, topology::DEFAULT_MAX_LOD);
-    assert_eq!(config.payload_precompute_max_lod, PAYLOAD_PRECOMPUTE_MAX_LOD);
+    assert_eq!(
+        config.payload_precompute_max_lod,
+        PAYLOAD_PRECOMPUTE_MAX_LOD
+    );
     assert_eq!(config.split_threshold_px, DEFAULT_SPLIT_THRESHOLD_PX);
     assert_eq!(config.merge_threshold_px, DEFAULT_MERGE_THRESHOLD_PX);
     assert_eq!(config.horizon_safety_margin, DEFAULT_HORIZON_SAFETY_MARGIN);
-    assert_eq!(config.physics_activation_radius, DEFAULT_PHYSICS_ACTIVATION_RADIUS);
+    assert_eq!(
+        config.physics_activation_radius,
+        DEFAULT_PHYSICS_ACTIVATION_RADIUS
+    );
     assert_eq!(
         config.physics_max_active_chunks,
         DEFAULT_PHYSICS_MAX_ACTIVE_CHUNKS
     );
-    assert_eq!(config.commit_budget_per_frame, DEFAULT_COMMIT_BUDGET_PER_FRAME);
+    assert_eq!(
+        config.commit_budget_per_frame,
+        DEFAULT_COMMIT_BUDGET_PER_FRAME
+    );
     assert_eq!(
         config.upload_budget_bytes_per_frame,
         DEFAULT_UPLOAD_BUDGET_BYTES_PER_FRAME
@@ -303,10 +312,52 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
         config.render_pool_watermark_per_class,
         DEFAULT_RENDER_POOL_WATERMARK_PER_CLASS
     );
-    assert_eq!(config.physics_pool_watermark, DEFAULT_PHYSICS_POOL_WATERMARK);
+    assert_eq!(
+        config.physics_pool_watermark,
+        DEFAULT_PHYSICS_POOL_WATERMARK
+    );
     assert!(config.physics_pool_watermark < config.render_pool_watermark_per_class);
     assert!((1..=DEFAULT_MAX_WORKER_THREADS).contains(&config.worker_thread_count));
     assert_eq!(runtime.worker_thread_count(), config.worker_thread_count);
+}
+
+#[test]
+fn phase14_build_order_sequence_is_contiguous_and_complete() {
+    let stages = PlanetRuntime::build_order_stages();
+
+    assert!(PlanetRuntime::build_order_is_contiguous());
+    assert_eq!(PlanetRuntime::build_order_stage_count(), 23);
+    assert_eq!(stages.first().map(|stage| stage.step), Some(1));
+    assert_eq!(
+        stages.first().map(|stage| stage.slug),
+        Some("face-basis-neighbors")
+    );
+    assert_eq!(stages.last().map(|stage| stage.step), Some(23));
+    assert_eq!(
+        stages.last().map(|stage| stage.slug),
+        Some("budgeting-polish")
+    );
+    assert!(stages.iter().all(|stage| !stage.description.is_empty()));
+}
+
+#[test]
+fn phase14_handoff_summary_matches_documented_phase_continuity() {
+    let runtime = test_runtime();
+    let handoffs = PlanetRuntime::build_order_handoffs();
+    let summary = runtime.build_order_summary();
+
+    assert_eq!(handoffs[0].covered_step_range, Some((1, 20)));
+    assert_eq!(handoffs[1].emphasized_steps, [5, 8, 19]);
+    assert_eq!(handoffs[2].covered_step_range, Some((21, 21)));
+    assert_eq!(handoffs[3].covered_step_range, Some((22, 22)));
+    assert_eq!(handoffs[4].covered_step_range, Some((23, 23)));
+    assert!(summary.contains("phase=14"));
+    assert!(summary.contains("phases01-10=1-20"));
+    assert!(summary.contains("phase11=doc+5/8/19"));
+    assert!(summary.contains("phase12=21"));
+    assert!(summary.contains("phase09=22"));
+    assert!(summary.contains("phase13=23"));
+    assert!(summary.contains(NEXT_PHASE_LABEL));
 }
 
 #[test]

@@ -107,7 +107,7 @@ Server-driven chunks plus pooling plus tighter FFI boundary are the right archit
 
 ## Prerequisites
 
-- [ ] Phase 14 build-order continuity completed.
+- [x] Phase 14 build-order continuity completed.
 
 ## Validation and Test Gates
 
