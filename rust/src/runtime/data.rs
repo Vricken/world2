@@ -587,6 +587,77 @@ pub struct ChunkRidState {
     pub pooled_surface_class: Option<SurfaceClassKey>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeamDebugSnapshot {
+    pub active_render_chunks: usize,
+    pub active_chunks_with_surface_class: usize,
+    pub active_chunks_missing_surface_class: usize,
+    pub active_stitched_chunks: usize,
+    pub pending_surface_class_mismatch_chunks: usize,
+    pub active_stitch_mask_counts: [usize; mesh_topology::STITCH_VARIANT_COUNT],
+    pub active_stitched_edge_counts: [usize; Edge::ALL.len()],
+    pub pooled_render_entries: usize,
+    pub pooled_stitch_mask_counts: [usize; mesh_topology::STITCH_VARIANT_COUNT],
+}
+
+impl Default for SeamDebugSnapshot {
+    fn default() -> Self {
+        Self {
+            active_render_chunks: 0,
+            active_chunks_with_surface_class: 0,
+            active_chunks_missing_surface_class: 0,
+            active_stitched_chunks: 0,
+            pending_surface_class_mismatch_chunks: 0,
+            active_stitch_mask_counts: [0; mesh_topology::STITCH_VARIANT_COUNT],
+            active_stitched_edge_counts: [0; Edge::ALL.len()],
+            pooled_render_entries: 0,
+            pooled_stitch_mask_counts: [0; mesh_topology::STITCH_VARIANT_COUNT],
+        }
+    }
+}
+
+impl SeamDebugSnapshot {
+    pub fn active_stitch_mask_summary(&self) -> String {
+        stitch_mask_summary(&self.active_stitch_mask_counts)
+    }
+
+    pub fn pooled_stitch_mask_summary(&self) -> String {
+        stitch_mask_summary(&self.pooled_stitch_mask_counts)
+    }
+
+    pub fn active_stitched_edge_summary(&self) -> String {
+        Edge::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, edge)| {
+                format!(
+                    "{}:{}",
+                    edge.label(),
+                    self.active_stitched_edge_counts[index]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    pub(crate) fn record_active_mask(&mut self, stitch_mask: u8) {
+        self.active_chunks_with_surface_class += 1;
+        record_mask(
+            stitch_mask,
+            &mut self.active_stitch_mask_counts,
+            Some((
+                &mut self.active_stitched_chunks,
+                &mut self.active_stitched_edge_counts,
+            )),
+        );
+    }
+
+    pub(crate) fn record_pooled_mask(&mut self, stitch_mask: u8) {
+        self.pooled_render_entries += 1;
+        record_mask(stitch_mask, &mut self.pooled_stitch_mask_counts, None);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderPoolEntry {
     pub mesh_rid: Rid,
@@ -621,6 +692,7 @@ pub struct RuntimeConfig {
     pub metadata_precompute_max_lod: u8,
     pub payload_precompute_max_lod: u8,
     pub worker_thread_count: usize,
+    pub planet_seed: u64,
     pub enable_godot_staging: bool,
     pub use_large_world_coordinates: bool,
     pub origin_recenter_distance: f64,
@@ -645,6 +717,8 @@ pub struct RuntimeConfig {
     pub render_index_stride: usize,
     pub render_pool_watermark_per_class: usize,
     pub physics_pool_watermark: usize,
+    pub asset_placement_cells_per_axis: u32,
+    pub asset_group_chunk_span: u32,
 }
 
 impl Default for RuntimeConfig {
@@ -659,6 +733,7 @@ impl Default for RuntimeConfig {
             metadata_precompute_max_lod: DEFAULT_METADATA_PRECOMPUTE_MAX_LOD,
             payload_precompute_max_lod: PAYLOAD_PRECOMPUTE_MAX_LOD,
             worker_thread_count,
+            planet_seed: DEFAULT_PLANET_SEED,
             enable_godot_staging: true,
             use_large_world_coordinates: false,
             origin_recenter_distance: DEFAULT_ORIGIN_RECENTER_DISTANCE,
@@ -683,6 +758,8 @@ impl Default for RuntimeConfig {
             render_index_stride: DEFAULT_RENDER_INDEX_STRIDE,
             render_pool_watermark_per_class: DEFAULT_RENDER_POOL_WATERMARK_PER_CLASS,
             physics_pool_watermark: DEFAULT_PHYSICS_POOL_WATERMARK,
+            asset_placement_cells_per_axis: DEFAULT_ASSET_PLACEMENT_CELLS_PER_AXIS,
+            asset_group_chunk_span: DEFAULT_ASSET_GROUP_CHUNK_SPAN,
         }
     }
 }
@@ -738,5 +815,59 @@ pub struct DeferredOpKey {
 impl DeferredOpKey {
     pub fn new(kind: CommitOpKind, key: ChunkKey) -> Self {
         Self { kind, key }
+    }
+}
+
+impl Edge {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NegU => "neg_u",
+            Self::PosU => "pos_u",
+            Self::NegV => "neg_v",
+            Self::PosV => "pos_v",
+        }
+    }
+}
+
+fn stitch_mask_summary(counts: &[usize; mesh_topology::STITCH_VARIANT_COUNT]) -> String {
+    let mut parts = Vec::new();
+
+    for (mask, count) in counts.iter().copied().enumerate() {
+        if count > 0 {
+            parts.push(format!("{mask}:{count}"));
+        }
+    }
+
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join("|")
+    }
+}
+
+fn record_mask(
+    stitch_mask: u8,
+    counts: &mut [usize; mesh_topology::STITCH_VARIANT_COUNT],
+    stitched_detail: Option<(&mut usize, &mut [usize; Edge::ALL.len()])>,
+) {
+    let mask_index = usize::from(stitch_mask);
+    if mask_index >= counts.len() {
+        return;
+    }
+
+    counts[mask_index] += 1;
+
+    let Some((stitched_chunks, stitched_edges)) = stitched_detail else {
+        return;
+    };
+    if stitch_mask == mesh_topology::BASE_STITCH_MASK {
+        return;
+    }
+
+    *stitched_chunks += 1;
+    for (index, edge) in Edge::ALL.into_iter().enumerate() {
+        if stitch_mask & mesh_topology::stitch_mask_bit(edge) != 0 {
+            stitched_edges[index] += 1;
+        }
     }
 }

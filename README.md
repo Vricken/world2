@@ -1,6 +1,6 @@
 # world2
 
-Phase 10 precision/origin hardening for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 12 asset-placement hardening for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -25,6 +25,10 @@ Phase 10 precision/origin hardening for a Godot + Rust (godot-rust/gdext) planet
 - Phase 09 runtime logging in `rust/src/lib.rs`, including worker-thread counts, queued job peaks, worker wait counts, scratch reuse hits, and scratch growth events in the headless validation output.
 - Phase 10 precision/origin policy across `rust/src/runtime/core.rs`, `rust/src/runtime/pipeline/commit.rs`, and `rust/src/runtime/math/utils.rs`, including `f64` chunk anchors as authority, chunk-local `f32` mesh/collider buffers, explicit render/physics transform conversion from a shared origin snapshot, thresholded camera-relative origin recentering, and active transform rebinds when the shared origin shifts.
 - Phase 10 scene-root rebasing in `rust/src/lib.rs`, including camera-state recovery from render-relative coordinates, root-node origin shifts for child gameplay nodes, and headless logging for origin rebases and transform rebind counts.
+- Phase 11 seam-validation coverage in `rust/src/runtime/tests.rs`, including rendered cross-face edge matching across all 24 directed face seams, delta-1 fine-to-coarse stitched-edge checks for all four edge directions, and deterministic seam-class warm-path rejection coverage.
+- Phase 11 seam diagnostics in `rust/src/runtime/data.rs`, `rust/src/runtime/core.rs`, and `rust/src/lib.rs`, including active and pooled stitch-mask summaries, stitched-edge counters, pending seam-mismatch detection, and headless/loggable inspection hooks on `PlanetRoot`.
+- Phase 12 deterministic asset placement in `rust/src/runtime/assets.rs`, `rust/src/runtime/pipeline/selection.rs`, and `rust/src/runtime/workers/payloads.rs`, including `(planet_seed, chunk_key, cell_id, family_id)` placement hashes, terrain-projected reject filters for biome/slope/curvature/altitude/procedural-mask/exclusion radius, and chunk-owned accepted transforms stored directly in `ChunkPayload.assets`.
+- Phase 12 compact asset residency in `rust/src/runtime/pipeline/commit.rs` and `rust/src/lib.rs`, including `RenderingServer` multimeshes grouped by `(face, lod, 2x2 chunk batch, asset family)`, per-group custom AABBs, shared family mesh RIDs, origin-shift rebind support, and headless counters for active asset groups/instances.
 - Fly debug controller in `scripts/player/fly_controller.gd` and `scenes/main.tscn`, with WASD + Space/Shift flight, mouse look, and Up/Down speed scaling over the default spawn outside the planet.
 - Launch and build scripts in `scripts/`.
 

@@ -1,3 +1,4 @@
+mod assets;
 mod core;
 mod data;
 mod math;
@@ -12,19 +13,19 @@ use std::thread::{self, JoinHandle};
 
 use glam::{DVec2, DVec3};
 use godot::builtin::{
-    Array, Color, Dictionary, PackedByteArray, PackedColorArray, PackedInt32Array,
+    Aabb, Array, Basis, Color, Dictionary, PackedByteArray, PackedColorArray, PackedInt32Array,
     PackedVector2Array, PackedVector3Array, Plane, Rid, StringName, Transform3D, Variant, Vector2,
     Vector3,
 };
 use godot::classes::physics_server_3d::{BodyMode, BodyState};
-use godot::classes::rendering_server::PrimitiveType;
+use godot::classes::rendering_server::{MultimeshTransformFormat, PrimitiveType};
 use godot::classes::{PhysicsServer3D, RenderingServer};
 use godot::meta::ToGodot;
 use godot::obj::Singleton;
 
 use crate::geometry::{
     chunk_uv_to_face_uv, cube_point_for_face, face_uv_to_signed_coords, CubeProjection,
-    TerrainFieldSettings,
+    TerrainFieldSettings, TerrainSample,
 };
 use crate::mesh_topology::{self, StitchError, CANONICAL_TOPOLOGY_CLASS};
 use crate::topology::{self, TopologyError};
@@ -32,6 +33,7 @@ use crate::topology::{self, TopologyError};
 use math::*;
 use workers::{PreparedRenderPayload, RenderPayloadRequest, ThreadedPayloadGenerator};
 
+pub use assets::*;
 pub use data::*;
 pub use pipeline::SelectionFrameState;
 
@@ -77,6 +79,8 @@ pub struct PlanetRuntime {
     pub rid_state: HashMap<ChunkKey, ChunkRidState>,
     pub render_pool: HashMap<SurfaceClassKey, VecDeque<RenderPoolEntry>>,
     pub physics_pool: VecDeque<PhysicsPoolEntry>,
+    pub asset_groups: HashMap<AssetGroupKey, AssetGroupState>,
+    pub asset_family_meshes: HashMap<u16, Rid>,
     threaded_payload_generator: ThreadedPayloadGenerator,
     pub origin_snapshot: OriginSnapshot,
     pub frame_state: SelectionFrameState,

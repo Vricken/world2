@@ -23,8 +23,11 @@ pub(crate) struct PreparedRenderPayload {
     pub key: ChunkKey,
     pub surface_class: SurfaceClassKey,
     pub sample_count: usize,
+    pub asset_candidate_count: usize,
+    pub asset_rejected_count: usize,
     pub chunk_origin_planet: DVec3,
     pub mesh: CpuMeshBuffers,
+    pub assets: Vec<AssetInstance>,
     pub packed_regions: PackedMeshRegions,
     pub scratch_metrics: WorkerScratchJobMetrics,
 }
@@ -346,14 +349,18 @@ fn build_render_payload_with_scratch(
         &mut scratch.attribute_region,
         &mut scratch.index_region,
     );
+    let placement = build_chunk_asset_placement(&request.config, request.key);
 
     PreparedRenderPayload {
         sequence: request.sequence,
         key: request.key,
         surface_class: request.surface_class.clone(),
         sample_count,
+        asset_candidate_count: placement.candidate_count,
+        asset_rejected_count: placement.rejected_count,
         chunk_origin_planet: request.chunk_origin_planet,
         mesh: scratch.mesh.clone(),
+        assets: placement.assets,
         packed_regions: PackedMeshRegions {
             vertex_region: scratch.vertex_region.clone(),
             attribute_region: scratch.attribute_region.clone(),

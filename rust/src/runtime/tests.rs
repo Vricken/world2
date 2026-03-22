@@ -121,6 +121,52 @@ fn visible_edge_vertex_index(edge: Edge, step: u32) -> usize {
     (y * mesh_topology::VISIBLE_VERTICES_PER_EDGE + x) as usize
 }
 
+fn opposite_edge(edge: Edge) -> Edge {
+    match edge {
+        Edge::NegU => Edge::PosU,
+        Edge::PosU => Edge::NegU,
+        Edge::NegV => Edge::PosV,
+        Edge::PosV => Edge::NegV,
+    }
+}
+
+fn boundary_key(face: Face, lod: u8, edge: Edge, seam_index: u32) -> ChunkKey {
+    let resolution = ChunkKey::resolution_for_lod(lod);
+    match edge {
+        Edge::NegU => ChunkKey::new(face, lod, 0, seam_index),
+        Edge::PosU => ChunkKey::new(face, lod, resolution - 1, seam_index),
+        Edge::NegV => ChunkKey::new(face, lod, seam_index, 0),
+        Edge::PosV => ChunkKey::new(face, lod, seam_index, resolution - 1),
+    }
+}
+
+fn stitched_edge_uses_vertex(mesh: &CpuMeshBuffers, vertex_index: usize) -> bool {
+    mesh.indices
+        .iter()
+        .copied()
+        .any(|index| usize::try_from(index).ok() == Some(vertex_index))
+}
+
+fn coarse_step_for_cover(fine_key: ChunkKey, edge: Edge, fine_step: u32) -> u32 {
+    debug_assert_eq!(fine_step % 2, 0);
+    let half_edge = mesh_topology::QUADS_PER_EDGE / 2;
+
+    match edge {
+        Edge::NegU | Edge::PosU => (fine_key.y % 2) * half_edge + fine_step / 2,
+        Edge::NegV | Edge::PosV => (fine_key.x % 2) * half_edge + fine_step / 2,
+    }
+}
+
+fn asset_group_summary(runtime: &PlanetRuntime) -> Vec<(AssetGroupKey, usize, Vec<ChunkKey>)> {
+    let mut summary = runtime
+        .asset_groups
+        .values()
+        .map(|state| (state.key, state.instance_count, state.source_chunks.clone()))
+        .collect::<Vec<_>>();
+    summary.sort_by(|a, b| a.0.cmp(&b.0));
+    summary
+}
+
 #[test]
 fn chunk_key_validates_coords_against_lod_resolution() {
     assert!(ChunkKey::new(Face::Px, 3, 7, 7).is_valid_for_lod());
@@ -379,51 +425,389 @@ fn generated_mesh_normals_point_outward() {
 }
 
 #[test]
-fn rendered_chunk_edges_match_across_cross_face_seams() {
+fn rendered_chunk_edges_match_across_all_cross_face_seams() {
     let mut runtime = test_runtime();
-    let key = ChunkKey::new(Face::Px, 0, 0, 0);
-    let edge = Edge::PosU;
-    let neighbor = topology::same_lod_neighbor(key, edge).unwrap();
-    let xform = topology::edge_transform(key.face, edge);
     let last = mesh_topology::VISIBLE_VERTICES_PER_EDGE - 1;
 
-    let chunk_origin = runtime.ensure_chunk_meta(key).unwrap().bounds.center_planet;
-    let chunk_samples = runtime.sample_chunk_scalar_field(key).unwrap();
-    let chunk_mesh = runtime
-        .derive_cpu_mesh_buffers(
-            &chunk_samples,
-            mesh_topology::BASE_STITCH_MASK,
-            chunk_origin,
-        )
-        .unwrap();
+    for face in Face::ALL {
+        for edge in Edge::ALL {
+            let key = boundary_key(face, 1, edge, 0);
+            let neighbor = topology::same_lod_neighbor(key, edge).unwrap();
+            let xform = topology::edge_transform(key.face, edge);
 
-    let neighbor_origin = runtime
-        .ensure_chunk_meta(neighbor)
-        .unwrap()
-        .bounds
-        .center_planet;
-    let neighbor_samples = runtime.sample_chunk_scalar_field(neighbor).unwrap();
-    let neighbor_mesh = runtime
-        .derive_cpu_mesh_buffers(
-            &neighbor_samples,
-            mesh_topology::BASE_STITCH_MASK,
-            neighbor_origin,
-        )
-        .unwrap();
+            let chunk_origin = runtime.ensure_chunk_meta(key).unwrap().bounds.center_planet;
+            let chunk_samples = runtime.sample_chunk_scalar_field(key).unwrap();
+            let chunk_mesh = runtime
+                .derive_cpu_mesh_buffers(
+                    &chunk_samples,
+                    mesh_topology::BASE_STITCH_MASK,
+                    chunk_origin,
+                )
+                .unwrap();
 
-    for step in 0..=last {
-        let chunk_index = visible_edge_vertex_index(edge, step);
-        let mapped_step = if xform.flip { last - step } else { step };
-        let neighbor_index = visible_edge_vertex_index(xform.neighbor_edge, mapped_step);
+            let neighbor_origin = runtime
+                .ensure_chunk_meta(neighbor)
+                .unwrap()
+                .bounds
+                .center_planet;
+            let neighbor_samples = runtime.sample_chunk_scalar_field(neighbor).unwrap();
+            let neighbor_mesh = runtime
+                .derive_cpu_mesh_buffers(
+                    &neighbor_samples,
+                    mesh_topology::BASE_STITCH_MASK,
+                    neighbor_origin,
+                )
+                .unwrap();
 
-        let chunk_position =
-            chunk_origin + local_position_to_dvec3(chunk_mesh.positions[chunk_index]);
-        let neighbor_position =
-            neighbor_origin + local_position_to_dvec3(neighbor_mesh.positions[neighbor_index]);
+            for step in 0..=last {
+                let chunk_index = visible_edge_vertex_index(edge, step);
+                let mapped_step = if xform.flip { last - step } else { step };
+                let neighbor_index = visible_edge_vertex_index(xform.neighbor_edge, mapped_step);
 
-        assert!(
-            (chunk_position - neighbor_position).length() < 1.0e-3,
-            "seam mismatch at step {step}: {chunk_position:?} vs {neighbor_position:?}"
+                let chunk_position =
+                    chunk_origin + local_position_to_dvec3(chunk_mesh.positions[chunk_index]);
+                let neighbor_position = neighbor_origin
+                    + local_position_to_dvec3(neighbor_mesh.positions[neighbor_index]);
+
+                assert!(
+                    (chunk_position - neighbor_position).length() < 1.0e-3,
+                    "seam mismatch face={face:?} edge={edge:?} step={step}: {chunk_position:?} vs {neighbor_position:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn stitched_fine_edges_match_coarse_cover_for_delta_one_neighbors() {
+    let mut runtime = test_runtime();
+    let cases = [
+        (ChunkKey::new(Face::Px, 2, 2, 1), Edge::NegU),
+        (ChunkKey::new(Face::Px, 2, 1, 1), Edge::PosU),
+        (ChunkKey::new(Face::Px, 2, 1, 2), Edge::NegV),
+        (ChunkKey::new(Face::Px, 2, 1, 1), Edge::PosV),
+    ];
+    let last = mesh_topology::VISIBLE_VERTICES_PER_EDGE - 1;
+
+    for (fine_key, edge) in cases {
+        let neighbor_same_lod = topology::same_lod_neighbor(fine_key, edge).unwrap();
+        let coarse_cover = neighbor_same_lod.parent().unwrap();
+        let desired_render = [fine_key, coarse_cover].into_iter().collect::<HashSet<_>>();
+        let fine_surface_class = runtime
+            .required_surface_class_for_selection(fine_key, &desired_render)
+            .unwrap();
+
+        assert_eq!(
+            fine_surface_class.stitch_mask,
+            mesh_topology::stitch_mask_bit(edge)
+        );
+
+        let fine_origin = runtime
+            .ensure_chunk_meta(fine_key)
+            .unwrap()
+            .bounds
+            .center_planet;
+        let fine_samples = runtime.sample_chunk_scalar_field(fine_key).unwrap();
+        let fine_mesh = runtime
+            .derive_cpu_mesh_buffers(&fine_samples, fine_surface_class.stitch_mask, fine_origin)
+            .unwrap();
+
+        let coarse_origin = runtime
+            .ensure_chunk_meta(coarse_cover)
+            .unwrap()
+            .bounds
+            .center_planet;
+        let coarse_samples = runtime.sample_chunk_scalar_field(coarse_cover).unwrap();
+        let coarse_mesh = runtime
+            .derive_cpu_mesh_buffers(
+                &coarse_samples,
+                mesh_topology::BASE_STITCH_MASK,
+                coarse_origin,
+            )
+            .unwrap();
+
+        for step in (0..=last).step_by(2) {
+            let fine_index = visible_edge_vertex_index(edge, step);
+            let coarse_index = visible_edge_vertex_index(
+                opposite_edge(edge),
+                coarse_step_for_cover(fine_key, edge, step),
+            );
+            let fine_position =
+                fine_origin + local_position_to_dvec3(fine_mesh.positions[fine_index]);
+            let coarse_position =
+                coarse_origin + local_position_to_dvec3(coarse_mesh.positions[coarse_index]);
+
+            assert!(
+                (fine_position - coarse_position).length() < 1.0e-3,
+                "delta-1 seam mismatch fine={fine_key:?} coarse={coarse_cover:?} edge={edge:?} step={step}: {fine_position:?} vs {coarse_position:?}"
+            );
+        }
+
+        for step in (1..last).step_by(2) {
+            let fine_index = visible_edge_vertex_index(edge, step);
+            assert!(
+                !stitched_edge_uses_vertex(&fine_mesh, fine_index),
+                "stitched edge kept odd boundary vertex fine={fine_key:?} edge={edge:?} step={step}"
+            );
+        }
+    }
+}
+
+#[test]
+fn seam_debug_snapshot_reports_active_and_pooled_stitch_masks() {
+    let key_a = ChunkKey::new(Face::Px, 2, 1, 1);
+    let key_b = ChunkKey::new(Face::Py, 2, 1, 1);
+    let key_c = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let key_d = ChunkKey::new(Face::Nz, 2, 1, 1);
+    let base_surface_class = SurfaceClassKey::canonical_chunk(
+        mesh_topology::BASE_STITCH_MASK,
+        DEFAULT_RENDER_MATERIAL_CLASS,
+        DEFAULT_RENDER_FORMAT_MASK,
+        DEFAULT_RENDER_VERTEX_STRIDE,
+        DEFAULT_RENDER_ATTRIBUTE_STRIDE,
+        DEFAULT_RENDER_INDEX_STRIDE,
+    )
+    .unwrap();
+    let pos_u_surface_class = SurfaceClassKey::canonical_chunk(
+        mesh_topology::stitch_mask_bit(Edge::PosU),
+        DEFAULT_RENDER_MATERIAL_CLASS,
+        DEFAULT_RENDER_FORMAT_MASK,
+        DEFAULT_RENDER_VERTEX_STRIDE,
+        DEFAULT_RENDER_ATTRIBUTE_STRIDE,
+        DEFAULT_RENDER_INDEX_STRIDE,
+    )
+    .unwrap();
+    let neg_u_neg_v_surface_class = SurfaceClassKey::canonical_chunk(
+        mesh_topology::stitch_mask_bit(Edge::NegU) | mesh_topology::stitch_mask_bit(Edge::NegV),
+        DEFAULT_RENDER_MATERIAL_CLASS,
+        DEFAULT_RENDER_FORMAT_MASK,
+        DEFAULT_RENDER_VERTEX_STRIDE,
+        DEFAULT_RENDER_ATTRIBUTE_STRIDE,
+        DEFAULT_RENDER_INDEX_STRIDE,
+    )
+    .unwrap();
+
+    let mut runtime = test_runtime();
+    runtime.active_render.extend([key_a, key_b, key_c, key_d]);
+    runtime.install_render_entry(
+        key_a,
+        Rid::new(1),
+        Rid::new(2),
+        base_surface_class.clone(),
+        None,
+    );
+    runtime.insert_payload(
+        key_b,
+        ChunkPayload {
+            surface_class: pos_u_surface_class.clone(),
+            ..sample_payload(&pos_u_surface_class, 1)
+        },
+    );
+    runtime.install_render_entry(
+        key_c,
+        Rid::new(3),
+        Rid::new(4),
+        base_surface_class.clone(),
+        None,
+    );
+    runtime.insert_payload(
+        key_c,
+        ChunkPayload {
+            surface_class: neg_u_neg_v_surface_class.clone(),
+            ..sample_payload(&neg_u_neg_v_surface_class, 2)
+        },
+    );
+    runtime.push_render_pool_entry(RenderPoolEntry {
+        mesh_rid: Rid::new(5),
+        render_instance_rid: Rid::new(6),
+        surface_class: pos_u_surface_class.clone(),
+        gd_staging: None,
+    });
+    runtime.push_render_pool_entry(RenderPoolEntry {
+        mesh_rid: Rid::new(7),
+        render_instance_rid: Rid::new(8),
+        surface_class: neg_u_neg_v_surface_class.clone(),
+        gd_staging: None,
+    });
+
+    let seam = runtime.seam_debug_snapshot();
+
+    assert_eq!(seam.active_render_chunks, 4);
+    assert_eq!(seam.active_chunks_with_surface_class, 3);
+    assert_eq!(seam.active_chunks_missing_surface_class, 1);
+    assert_eq!(seam.active_stitched_chunks, 1);
+    assert_eq!(seam.pending_surface_class_mismatch_chunks, 1);
+    assert_eq!(
+        seam.active_stitch_mask_counts[mesh_topology::BASE_STITCH_MASK as usize],
+        2
+    );
+    assert_eq!(
+        seam.active_stitch_mask_counts[mesh_topology::stitch_mask_bit(Edge::PosU) as usize],
+        1
+    );
+    assert_eq!(seam.active_stitched_edge_counts[1], 1);
+    assert_eq!(seam.pooled_render_entries, 2);
+    assert_eq!(
+        seam.pooled_stitch_mask_counts[mesh_topology::stitch_mask_bit(Edge::PosU) as usize],
+        1
+    );
+    assert_eq!(
+        seam.pooled_stitch_mask_counts[(mesh_topology::stitch_mask_bit(Edge::NegU)
+            | mesh_topology::stitch_mask_bit(Edge::NegV))
+            as usize],
+        1
+    );
+    assert_eq!(seam.active_stitch_mask_summary(), "0:2|2:1");
+    assert_eq!(seam.pooled_stitch_mask_summary(), "2:1|5:1");
+    assert_eq!(
+        seam.active_stitched_edge_summary(),
+        "neg_u:0|pos_u:1|neg_v:0|pos_v:0"
+    );
+}
+
+#[test]
+fn phase12_chunk_asset_placement_replays_for_same_seed() {
+    let config = RuntimeConfig {
+        planet_seed: 42,
+        ..RuntimeConfig::default()
+    };
+    let key = (0..=3)
+        .flat_map(|y| (0..=3).map(move |x| ChunkKey::new(Face::Px, 3, x, y)))
+        .find(|key| !build_chunk_asset_placement(&config, *key).assets.is_empty())
+        .expect("phase 12 test should find at least one populated chunk");
+
+    let a = build_chunk_asset_placement(&config, key);
+    let b = build_chunk_asset_placement(&config, key);
+    let c = build_chunk_asset_placement(
+        &RuntimeConfig {
+            planet_seed: 43,
+            ..config.clone()
+        },
+        key,
+    );
+
+    assert_eq!(a, b);
+    assert!(a.candidate_count > 0);
+    assert!(!a.assets.is_empty());
+    assert!(a.assets.iter().all(|asset| asset.scale > 0.0));
+    assert_ne!(a.assets, c.assets);
+}
+
+#[test]
+fn phase12_asset_grouping_stays_compact_within_chunk_batches() {
+    let span = DEFAULT_ASSET_GROUP_CHUNK_SPAN;
+    let key_a = ChunkKey::new(Face::Px, 3, 0, 0);
+    let key_b = ChunkKey::new(Face::Px, 3, 1, 1);
+    let key_c = ChunkKey::new(Face::Px, 3, span, 0);
+
+    let group_a = asset_group_key_for_chunk(key_a, 0, span);
+    let group_b = asset_group_key_for_chunk(key_b, 0, span);
+    let group_c = asset_group_key_for_chunk(key_c, 0, span);
+
+    assert_eq!(group_a, group_b);
+    assert_ne!(group_a, group_c);
+}
+
+#[test]
+fn phase12_asset_residency_follows_active_render_chunks() {
+    let mut runtime = test_runtime();
+    let keys = [
+        ChunkKey::new(Face::Px, 3, 0, 0),
+        ChunkKey::new(Face::Px, 3, 1, 0),
+        ChunkKey::new(Face::Px, 3, 2, 0),
+    ];
+
+    for (fill, key) in keys.into_iter().enumerate() {
+        let meta = runtime.ensure_chunk_meta(key).unwrap().clone();
+        runtime.insert_payload(
+            key,
+            ChunkPayload {
+                surface_class: meta.surface_class.clone(),
+                chunk_origin_planet: meta.bounds.center_planet,
+                assets: build_chunk_asset_placement(&runtime.config, key).assets,
+                ..sample_payload(&meta.surface_class, fill as u8)
+            },
+        );
+    }
+
+    runtime.active_render.extend([keys[0], keys[1]]);
+    let mut frame_state = SelectionFrameState::default();
+    runtime.sync_asset_groups(&mut frame_state).unwrap();
+    let expected_before = build_desired_asset_groups(
+        &runtime.config,
+        &runtime.active_render,
+        &runtime.resident_payloads,
+        &runtime.meta,
+    );
+
+    assert_eq!(runtime.active_asset_group_count(), expected_before.len());
+    assert_eq!(
+        runtime.active_asset_instance_count(),
+        expected_before
+            .values()
+            .map(|group| group.assets.len())
+            .sum::<usize>()
+    );
+    assert_eq!(asset_group_summary(&runtime).len(), expected_before.len());
+
+    runtime.active_render.remove(&keys[0]);
+    runtime.sync_asset_groups(&mut frame_state).unwrap();
+    let expected_after = build_desired_asset_groups(
+        &runtime.config,
+        &runtime.active_render,
+        &runtime.resident_payloads,
+        &runtime.meta,
+    );
+
+    assert_eq!(runtime.active_asset_group_count(), expected_after.len());
+    assert_eq!(
+        runtime.active_asset_instance_count(),
+        expected_after
+            .values()
+            .map(|group| group.assets.len())
+            .sum::<usize>()
+    );
+
+    runtime.active_render.clear();
+    runtime.sync_asset_groups(&mut frame_state).unwrap();
+    assert_eq!(runtime.active_asset_group_count(), 0);
+    assert_eq!(runtime.active_asset_instance_count(), 0);
+}
+
+#[test]
+fn phase12_camera_path_replays_asset_residency_deterministically() {
+    let config = RuntimeConfig {
+        metadata_precompute_max_lod: 0,
+        enable_godot_staging: false,
+        planet_seed: 7,
+        ..RuntimeConfig::default()
+    };
+    let mut runtime_a = PlanetRuntime::new(config.clone(), Rid::Invalid, Rid::Invalid);
+    let mut runtime_b = PlanetRuntime::new(config, Rid::Invalid, Rid::Invalid);
+    let path = [
+        orbit_camera_state(),
+        CameraState {
+            position_planet: DVec3::new(450.0, 120.0, 1_650.0),
+            ..orbit_camera_state()
+        },
+        near_surface_camera_state(),
+        CameraState {
+            position_planet: DVec3::new(220.0, 90.0, 1_120.0),
+            ..near_surface_camera_state()
+        },
+    ];
+
+    for camera in path {
+        runtime_a.step_visibility_selection(&camera).unwrap();
+        runtime_b.step_visibility_selection(&camera).unwrap();
+
+        assert_eq!(
+            runtime_a.asset_debug_snapshot(),
+            runtime_b.asset_debug_snapshot()
+        );
+        assert_eq!(
+            asset_group_summary(&runtime_a),
+            asset_group_summary(&runtime_b)
         );
     }
 }

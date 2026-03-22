@@ -21,6 +21,8 @@ impl PlanetRuntime {
             rid_state: HashMap::new(),
             render_pool: HashMap::new(),
             physics_pool: VecDeque::new(),
+            asset_groups: HashMap::new(),
+            asset_family_meshes: HashMap::new(),
             frame_state: SelectionFrameState::default(),
             deferred_starvation: HashMap::new(),
             origin_shift_pending_rebind: false,
@@ -307,5 +309,66 @@ impl PlanetRuntime {
 
     pub fn rid_state_count(&self) -> usize {
         self.rid_state.len()
+    }
+
+    pub fn active_asset_group_count(&self) -> usize {
+        self.asset_groups.len()
+    }
+
+    pub fn active_asset_instance_count(&self) -> usize {
+        self.asset_groups
+            .values()
+            .map(|group| group.instance_count)
+            .sum()
+    }
+
+    pub fn asset_family_mesh_count(&self) -> usize {
+        self.asset_family_meshes.len()
+    }
+
+    pub fn asset_debug_snapshot(&self) -> AssetDebugSnapshot {
+        asset_debug_snapshot(&self.asset_groups, &self.asset_family_meshes)
+    }
+
+    pub fn seam_debug_snapshot(&self) -> SeamDebugSnapshot {
+        let mut snapshot = SeamDebugSnapshot {
+            active_render_chunks: self.active_render.len(),
+            ..SeamDebugSnapshot::default()
+        };
+
+        for key in &self.active_render {
+            let active_surface_class = self.rid_state.get(key).and_then(|state| {
+                state
+                    .render_resident
+                    .then_some(state.active_surface_class.as_ref())
+                    .flatten()
+            });
+            let payload_surface_class = self
+                .resident_payloads
+                .get(key)
+                .map(|payload| &payload.surface_class);
+
+            if let (Some(active_surface_class), Some(payload_surface_class)) =
+                (active_surface_class, payload_surface_class)
+            {
+                if active_surface_class != payload_surface_class {
+                    snapshot.pending_surface_class_mismatch_chunks += 1;
+                }
+            }
+
+            if let Some(surface_class) = active_surface_class.or(payload_surface_class) {
+                snapshot.record_active_mask(surface_class.stitch_mask);
+            } else {
+                snapshot.active_chunks_missing_surface_class += 1;
+            }
+        }
+
+        for entries in self.render_pool.values() {
+            for entry in entries {
+                snapshot.record_pooled_mask(entry.surface_class.stitch_mask);
+            }
+        }
+
+        snapshot
     }
 }

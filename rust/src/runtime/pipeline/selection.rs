@@ -44,6 +44,12 @@ pub struct SelectionFrameState {
     pub phase10_origin_rebases: usize,
     pub phase10_render_transform_rebinds: usize,
     pub phase10_physics_transform_rebinds: usize,
+    pub phase12_chunks_with_asset_payloads: usize,
+    pub phase12_asset_candidate_count: usize,
+    pub phase12_asset_rejected_count: usize,
+    pub phase12_asset_accepted_count: usize,
+    pub phase12_active_groups: usize,
+    pub phase12_active_instances: usize,
     pub render_pool_entries: usize,
     pub physics_pool_entries: usize,
 }
@@ -626,13 +632,17 @@ impl PlanetRuntime {
         let packed_regions = self
             .pack_mesh_regions(&mesh, &request.surface_class)
             .expect("phase 7 packer must match configured surface strides");
+        let placement = build_chunk_asset_placement(&self.config, key);
         let prepared = PreparedRenderPayload {
             sequence: request.sequence,
             key,
             surface_class: request.surface_class,
             sample_count: samples.len(),
+            asset_candidate_count: placement.candidate_count,
+            asset_rejected_count: placement.rejected_count,
             chunk_origin_planet: request.chunk_origin_planet,
             mesh,
+            assets: placement.assets,
             packed_regions,
             scratch_metrics: super::super::workers::payloads::WorkerScratchJobMetrics::default(),
         };
@@ -714,8 +724,11 @@ impl PlanetRuntime {
             key,
             surface_class,
             sample_count,
+            asset_candidate_count,
+            asset_rejected_count,
             chunk_origin_planet,
             mesh,
+            assets,
             packed_regions,
             ..
         } = prepared;
@@ -723,6 +736,10 @@ impl PlanetRuntime {
         frame_state.phase7_sampled_chunks += 1;
         frame_state.phase7_meshed_chunks += 1;
         frame_state.phase7_packed_chunks += 1;
+        frame_state.phase12_asset_candidate_count += asset_candidate_count;
+        frame_state.phase12_asset_rejected_count += asset_rejected_count;
+        frame_state.phase12_asset_accepted_count += assets.len();
+        frame_state.phase12_chunks_with_asset_payloads += 1;
 
         let current_surface_class = self
             .rid_state
@@ -790,7 +807,7 @@ impl PlanetRuntime {
                 RenderWarmPath::ReusePooledSurface(entry) => Some(entry),
                 _ => None,
             },
-            assets: Vec::new(),
+            assets,
             collider_vertices: None,
             collider_indices: None,
             render_lifecycle,

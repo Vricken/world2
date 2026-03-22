@@ -105,8 +105,12 @@ impl PlanetRuntime {
             .copied()
             .max()
             .unwrap_or(0);
+        self.sync_asset_groups(frame_state)?;
         frame_state.render_pool_entries = self.render_pool_entry_count();
         frame_state.physics_pool_entries = self.physics_pool.len();
+        let asset_debug = self.asset_debug_snapshot();
+        frame_state.phase12_active_groups = asset_debug.active_groups;
+        frame_state.phase12_active_instances = asset_debug.active_instances;
 
         Ok(())
     }
@@ -747,6 +751,202 @@ impl PlanetRuntime {
         }
     }
 
+    pub(crate) fn sync_asset_groups(
+        &mut self,
+        frame_state: &mut SelectionFrameState,
+    ) -> Result<(), TopologyError> {
+        let desired = build_desired_asset_groups(
+            &self.config,
+            &self.active_render,
+            &self.resident_payloads,
+            &self.meta,
+        );
+        let desired_keys = desired.keys().copied().collect::<HashSet<_>>();
+        let current_keys = self.asset_groups.keys().copied().collect::<Vec<_>>();
+
+        for key in current_keys {
+            if !desired_keys.contains(&key) {
+                self.deactivate_asset_group(key);
+            }
+        }
+
+        let mut desired_groups = desired.into_values().collect::<Vec<_>>();
+        desired_groups.sort_by_key(|group| group.key);
+        for group in desired_groups {
+            self.commit_asset_group(group, frame_state)?;
+        }
+
+        self.rebuild_chunk_asset_rid_links();
+        Ok(())
+    }
+
+    fn commit_asset_group(
+        &mut self,
+        group: DesiredAssetGroup,
+        frame_state: &mut SelectionFrameState,
+    ) -> Result<(), TopologyError> {
+        let DesiredAssetGroup {
+            key,
+            group_origin_planet,
+            source_chunks,
+            assets,
+        } = group;
+
+        if assets.is_empty() {
+            self.deactivate_asset_group(key);
+            return Ok(());
+        }
+
+        let (multimesh_rid, render_instance_rid) = {
+            let existing = self.asset_groups.get(&key).cloned();
+            match existing {
+                Some(existing) => (existing.multimesh_rid, existing.render_instance_rid),
+                None => (None, None),
+            }
+        };
+
+        let mesh_rid = self.ensure_asset_family_mesh_rid(key.family_id);
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            let multimesh_rid =
+                multimesh_rid.unwrap_or_else(|| rendering_server.multimesh_create());
+            rendering_server.multimesh_allocate_data(
+                multimesh_rid,
+                assets.len() as i32,
+                MultimeshTransformFormat::TRANSFORM_3D,
+            );
+            rendering_server.multimesh_set_mesh(multimesh_rid, mesh_rid);
+            if let Some(aabb) = asset_group_local_aabb(group_origin_planet, &assets) {
+                rendering_server.multimesh_set_custom_aabb(multimesh_rid, aabb);
+            }
+            for (index, asset) in assets.iter().enumerate() {
+                rendering_server.multimesh_instance_set_transform(
+                    multimesh_rid,
+                    index as i32,
+                    self.asset_local_transform(group_origin_planet, asset),
+                );
+            }
+            rendering_server.multimesh_set_visible_instances(multimesh_rid, assets.len() as i32);
+
+            let render_instance_rid =
+                render_instance_rid.unwrap_or_else(|| rendering_server.instance_create());
+            rendering_server.instance_set_base(render_instance_rid, multimesh_rid);
+            rendering_server.instance_set_scenario(render_instance_rid, self.scenario_rid);
+            rendering_server.instance_set_transform(
+                render_instance_rid,
+                self.render_transform_for_chunk(group_origin_planet),
+            );
+            rendering_server.instance_set_visible(render_instance_rid, true);
+
+            self.asset_groups.insert(
+                key,
+                AssetGroupState {
+                    key,
+                    group_origin_planet,
+                    source_chunks,
+                    instance_count: assets.len(),
+                    multimesh_rid: Some(multimesh_rid),
+                    render_instance_rid: Some(render_instance_rid),
+                },
+            );
+        } else {
+            self.asset_groups.insert(
+                key,
+                AssetGroupState {
+                    key,
+                    group_origin_planet,
+                    source_chunks,
+                    instance_count: assets.len(),
+                    multimesh_rid: None,
+                    render_instance_rid: None,
+                },
+            );
+        }
+
+        frame_state.phase12_active_groups = self.asset_groups.len();
+        frame_state.phase12_active_instances = self.active_asset_instance_count();
+        Ok(())
+    }
+
+    fn deactivate_asset_group(&mut self, key: AssetGroupKey) {
+        let Some(state) = self.asset_groups.remove(&key) else {
+            return;
+        };
+
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            if let Some(render_instance_rid) = state.render_instance_rid {
+                rendering_server.instance_set_visible(render_instance_rid, false);
+                rendering_server.free_rid(render_instance_rid);
+            }
+            if let Some(multimesh_rid) = state.multimesh_rid {
+                rendering_server.free_rid(multimesh_rid);
+            }
+        }
+    }
+
+    fn ensure_asset_family_mesh_rid(&mut self, family_id: u16) -> Rid {
+        if let Some(mesh_rid) = self.asset_family_meshes.get(&family_id).copied() {
+            return mesh_rid;
+        }
+
+        let family = ASSET_FAMILY_DEFINITIONS
+            .iter()
+            .copied()
+            .find(|family| family.family_id == family_id)
+            .unwrap_or(ASSET_FAMILY_DEFINITIONS[0]);
+
+        let mesh_rid = if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            let mesh_rid = rendering_server.mesh_create();
+            let mesh = build_asset_mesh(family);
+            rendering_server.mesh_add_surface_from_arrays(
+                mesh_rid,
+                PrimitiveType::TRIANGLES,
+                &cpu_mesh_to_surface_arrays(&mesh),
+            );
+            mesh_rid
+        } else {
+            Rid::Invalid
+        };
+
+        self.asset_family_meshes.insert(family_id, mesh_rid);
+        mesh_rid
+    }
+
+    fn rebuild_chunk_asset_rid_links(&mut self) {
+        for rid_state in self.rid_state.values_mut() {
+            rid_state.asset_multimesh_rids.clear();
+            rid_state.asset_instance_rids.clear();
+        }
+
+        let groups = self.asset_groups.values().cloned().collect::<Vec<_>>();
+        for state in groups {
+            for key in &state.source_chunks {
+                let rid_state = self.ensure_rid_state(*key);
+                if let Some(multimesh_rid) = state.multimesh_rid {
+                    rid_state.asset_multimesh_rids.push(multimesh_rid);
+                }
+                if let Some(render_instance_rid) = state.render_instance_rid {
+                    rid_state.asset_instance_rids.push(render_instance_rid);
+                }
+            }
+        }
+    }
+
+    fn asset_local_transform(
+        &self,
+        group_origin_planet: DVec3,
+        asset: &AssetInstance,
+    ) -> Transform3D {
+        let basis = Basis::from_rows(
+            dvec3_to_vector3(asset.basis_x * f64::from(asset.scale)),
+            dvec3_to_vector3(asset.basis_y * f64::from(asset.scale)),
+            dvec3_to_vector3(asset.basis_z * f64::from(asset.scale)),
+        );
+        Transform3D::new(basis, dvec3_to_vector3(asset.origin - group_origin_planet))
+    }
+
     pub(crate) fn horizon_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {
         let camera_distance = camera.position_planet.length().max(f64::EPSILON);
         let occluder_radius = (self.config.planet_radius - self.config.height_amplitude).max(1.0);
@@ -822,6 +1022,7 @@ impl PlanetRuntime {
     ) {
         let render_keys = self.active_render.iter().copied().collect::<Vec<_>>();
         let physics_keys = self.active_physics.iter().copied().collect::<Vec<_>>();
+        let asset_groups = self.asset_groups.values().cloned().collect::<Vec<_>>();
 
         if self.should_commit_to_servers() {
             let mut rendering_server = RenderingServer::singleton();
@@ -839,6 +1040,16 @@ impl PlanetRuntime {
                 rendering_server.instance_set_transform(
                     render_instance_rid,
                     self.render_transform_for_chunk(chunk_origin_planet),
+                );
+                frame_state.phase10_render_transform_rebinds += 1;
+            }
+            for group in &asset_groups {
+                let Some(render_instance_rid) = group.render_instance_rid else {
+                    continue;
+                };
+                rendering_server.instance_set_transform(
+                    render_instance_rid,
+                    self.render_transform_for_chunk(group.group_origin_planet),
                 );
                 frame_state.phase10_render_transform_rebinds += 1;
             }
@@ -870,6 +1081,7 @@ impl PlanetRuntime {
                     frame_state.phase10_render_transform_rebinds += 1;
                 }
             }
+            frame_state.phase10_render_transform_rebinds += asset_groups.len();
             for key in physics_keys {
                 if self.chunk_origin_planet_for_key(key).is_some() {
                     frame_state.phase10_physics_transform_rebinds += 1;
@@ -909,6 +1121,8 @@ impl PlanetRuntime {
                 rid_state.active_surface_class = None;
                 rid_state.pooled_surface_class = None;
                 rid_state.gd_staging = None;
+                rid_state.asset_multimesh_rids.clear();
+                rid_state.asset_instance_rids.clear();
                 rid_state.render_resident = false;
                 rid_state.physics_resident = false;
             }
@@ -924,6 +1138,20 @@ impl PlanetRuntime {
                 physics_server.free_rid(entry.physics_body_rid);
                 physics_server.free_rid(entry.physics_shape_rid);
             }
+            for (_, state) in self.asset_groups.drain() {
+                if let Some(render_instance_rid) = state.render_instance_rid {
+                    rendering_server.instance_set_visible(render_instance_rid, false);
+                    rendering_server.free_rid(render_instance_rid);
+                }
+                if let Some(multimesh_rid) = state.multimesh_rid {
+                    rendering_server.free_rid(multimesh_rid);
+                }
+            }
+            for (_, mesh_rid) in self.asset_family_meshes.drain() {
+                if mesh_rid != Rid::Invalid {
+                    rendering_server.free_rid(mesh_rid);
+                }
+            }
         } else {
             for payload in self.resident_payloads.values_mut() {
                 payload.pooled_render_entry = None;
@@ -936,11 +1164,15 @@ impl PlanetRuntime {
                 rid_state.active_surface_class = None;
                 rid_state.pooled_surface_class = None;
                 rid_state.gd_staging = None;
+                rid_state.asset_multimesh_rids.clear();
+                rid_state.asset_instance_rids.clear();
                 rid_state.render_resident = false;
                 rid_state.physics_resident = false;
             }
             self.render_pool.clear();
             self.physics_pool.clear();
+            self.asset_groups.clear();
+            self.asset_family_meshes.clear();
         }
 
         self.active_render.clear();
