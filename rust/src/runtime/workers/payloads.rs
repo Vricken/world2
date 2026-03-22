@@ -401,8 +401,9 @@ fn sample_chunk_scalar_field_into(
             let face_uv =
                 chunk_uv_to_face_uv(key, chunk_uv).expect("phase 9 worker keys must be valid");
             let cube_point = cube_point_for_face(key.face, face_uv_to_signed_coords(face_uv));
-            let unit_dir = CubeProjection::Spherified
-                .project_cube_point(normalize_to_cube_surface(cube_point));
+            let unit_dir = config
+                .cube_projection
+                .project(normalize_to_cube_surface(cube_point));
             let height = terrain
                 .sample_height(unit_dir)
                 .clamp(-config.height_amplitude, config.height_amplitude)

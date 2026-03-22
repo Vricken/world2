@@ -82,7 +82,7 @@ When in doubt, choose behavior explicitly documented by Godot and godot-rust, th
 - [x] [Phase 12 - Asset Placement](phase-12-seam-handling-rules.md)
 - [x] [Phase 13 - Default Numbers I Would Start With](phase-13-asset-placement.md)
 - [x] [Phase 14 - Build Order](phase-14-default-numbers-and-tuning.md)
-- [ ] [Phase 15 - One Important Refinement](phase-15-build-order-and-strategy-refinement.md)
+- [x] [Phase 15 - One Important Refinement](phase-15-build-order-and-strategy-refinement.md)
 
 ## Big Plan Coverage Map
 

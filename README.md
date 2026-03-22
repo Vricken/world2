@@ -1,6 +1,6 @@
 # world2
 
-Phase 14 build-order continuity for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 15 strategy-layer refinement for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -31,6 +31,7 @@ Phase 14 build-order continuity for a Godot + Rust (godot-rust/gdext) planet run
 - Phase 12 compact asset residency in `rust/src/runtime/pipeline/commit.rs` and `rust/src/lib.rs`, including `RenderingServer` multimeshes grouped by `(face, lod, 2x2 chunk batch, asset family)`, per-group custom AABBs, shared family mesh RIDs, origin-shift rebind support, and headless counters for active asset groups/instances.
 - Phase 13 runtime default controls in `rust/src/runtime.rs`, `rust/src/runtime/data.rs`, `rust/src/runtime/pipeline/commit.rs`, and `rust/src/runtime/tests.rs`, including explicit commit/upload budgets, per-kind activation caps, `payload_precompute_max_lod = 5`, a conservative `physics_pool_watermark = 4` below the render per-class watermark, and regression coverage for the documented starting values.
 - Phase 14 build-order continuity in `rust/src/runtime.rs`, `rust/src/runtime/tests.rs`, and `rust/src/lib.rs`, including the explicit 23-step implementation sequence, phase-to-step handoff metadata for phases 01-13, runtime-accessible build-order summaries, and regression coverage that prevents sequencing drift.
+- Phase 15 strategy seams in `rust/src/runtime/strategy.rs`, `rust/src/runtime/data.rs`, `rust/src/runtime/pipeline/selection.rs`, `rust/src/runtime/pipeline/commit.rs`, `rust/src/runtime/workers/payloads.rs`, `rust/src/runtime/assets.rs`, `rust/src/runtime/tests.rs`, and `rust/src/lib.rs`, including config-backed projection/visibility/backend/staging policies, default strategy summaries in runtime logs, and regression coverage that keeps the shipped strategy stack behaviorally aligned with phases 01-14.
 - Fly debug controller in `scripts/player/fly_controller.gd` and `scenes/main.tscn`, with WASD + Space/Shift flight, mouse look, and Up/Down speed scaling over the default spawn outside the planet.
 - Launch and build scripts in `scripts/`.
 

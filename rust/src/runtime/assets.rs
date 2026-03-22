@@ -341,23 +341,27 @@ fn sample_asset_site(
     terrain: &TerrainFieldSettings,
 ) -> Option<AssetSiteSample> {
     let sample_offset = (0.35 / f64::from(config.asset_placement_cells_per_axis.max(1))).min(0.02);
-    let center = sample_surface_point(key, chunk_uv, terrain)?;
+    let center = sample_surface_point(config, key, chunk_uv, terrain)?;
     let left = sample_surface_point(
+        config,
         key,
         DVec2::new((chunk_uv.x - sample_offset).clamp(0.0, 1.0), chunk_uv.y),
         terrain,
     )?;
     let right = sample_surface_point(
+        config,
         key,
         DVec2::new((chunk_uv.x + sample_offset).clamp(0.0, 1.0), chunk_uv.y),
         terrain,
     )?;
     let down = sample_surface_point(
+        config,
         key,
         DVec2::new(chunk_uv.x, (chunk_uv.y - sample_offset).clamp(0.0, 1.0)),
         terrain,
     )?;
     let up = sample_surface_point(
+        config,
         key,
         DVec2::new(chunk_uv.x, (chunk_uv.y + sample_offset).clamp(0.0, 1.0)),
         terrain,
@@ -396,14 +400,16 @@ fn sample_asset_site(
 }
 
 fn sample_surface_point(
+    config: &RuntimeConfig,
     key: ChunkKey,
     chunk_uv: DVec2,
     terrain: &TerrainFieldSettings,
 ) -> Option<TerrainSample> {
     let face_uv = chunk_uv_to_face_uv(key, chunk_uv).ok()?;
     let cube_point = cube_point_for_face(key.face, face_uv_to_signed_coords(face_uv));
-    let unit_dir =
-        CubeProjection::Spherified.project_cube_point(normalize_to_cube_surface(cube_point));
+    let unit_dir = config
+        .cube_projection
+        .project(normalize_to_cube_surface(cube_point));
     let planet_point = unit_dir * terrain.planet_radius;
     let height = terrain
         .sample_height(unit_dir)

@@ -3,6 +3,7 @@ mod core;
 mod data;
 mod math;
 mod pipeline;
+mod strategy;
 #[cfg(test)]
 mod tests;
 mod workers;
@@ -36,6 +37,7 @@ use workers::{PreparedRenderPayload, RenderPayloadRequest, ThreadedPayloadGenera
 pub use assets::*;
 pub use data::*;
 pub use pipeline::SelectionFrameState;
+pub use strategy::*;
 
 /// Treat Rust->Godot packed-array transfer as copy-possible unless the docs
 /// explicitly guarantee a zero-copy ownership handoff for the exact API used.
@@ -62,9 +64,9 @@ pub const DEFAULT_RENDER_INDEX_STRIDE: usize = 4;
 pub const DEFAULT_RENDER_POOL_WATERMARK_PER_CLASS: usize = 8;
 pub const DEFAULT_PHYSICS_POOL_WATERMARK: usize = 4;
 pub const DEFAULT_MAX_WORKER_THREADS: usize = 4;
-pub const CURRENT_IMPLEMENTED_PHASE: u8 = 14;
-pub const CURRENT_IMPLEMENTED_PHASE_LABEL: &str = "Phase 14 build-order continuity";
-pub const NEXT_PHASE_LABEL: &str = "Phase 15 - One Important Refinement";
+pub const CURRENT_IMPLEMENTED_PHASE: u8 = 15;
+pub const CURRENT_IMPLEMENTED_PHASE_LABEL: &str = "Phase 15 strategy-layer refinement";
+pub const NEXT_PHASE_LABEL: &str = "none";
 const PACKED_NORMAL_BYTES: usize = 12;
 const PACKED_UV_BYTES: usize = 8;
 const PACKED_COLOR_BYTES: usize = 4;
@@ -284,6 +286,16 @@ impl PlanetRuntime {
             Self::build_order_stage_count(),
             handoff,
             NEXT_PHASE_LABEL
+        )
+    }
+
+    pub fn strategy_summary(&self) -> String {
+        format!(
+            "projection={} visibility={} render_backend={} staging={}",
+            ProjectionStrategy::label(&self.config.cube_projection),
+            ChunkVisibilityStrategy::label(&self.config.visibility_strategy),
+            ChunkRenderBackend::label(&self.config.render_backend),
+            PackedStagingPolicy::label(&self.config.staging_policy),
         )
     }
 }

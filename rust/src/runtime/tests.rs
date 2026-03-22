@@ -341,7 +341,7 @@ fn phase14_build_order_sequence_is_contiguous_and_complete() {
 }
 
 #[test]
-fn phase14_handoff_summary_matches_documented_phase_continuity() {
+fn build_order_handoff_summary_matches_documented_phase_continuity() {
     let runtime = test_runtime();
     let handoffs = PlanetRuntime::build_order_handoffs();
     let summary = runtime.build_order_summary();
@@ -351,13 +351,74 @@ fn phase14_handoff_summary_matches_documented_phase_continuity() {
     assert_eq!(handoffs[2].covered_step_range, Some((21, 21)));
     assert_eq!(handoffs[3].covered_step_range, Some((22, 22)));
     assert_eq!(handoffs[4].covered_step_range, Some((23, 23)));
-    assert!(summary.contains("phase=14"));
+    assert!(summary.contains("phase=15"));
     assert!(summary.contains("phases01-10=1-20"));
     assert!(summary.contains("phase11=doc+5/8/19"));
     assert!(summary.contains("phase12=21"));
     assert!(summary.contains("phase09=22"));
     assert!(summary.contains("phase13=23"));
     assert!(summary.contains(NEXT_PHASE_LABEL));
+}
+
+#[test]
+fn phase15_default_strategy_summary_matches_documented_stack() {
+    let runtime = test_runtime();
+    let config = &runtime.config;
+    let summary = runtime.strategy_summary();
+
+    assert_eq!(
+        ProjectionStrategy::label(&config.cube_projection),
+        "spherified_cube"
+    );
+    assert_eq!(
+        ChunkVisibilityStrategy::label(&config.visibility_strategy),
+        "horizon_frustum_lod"
+    );
+    assert_eq!(
+        ChunkRenderBackend::label(&config.render_backend),
+        "server_pool_render_backend"
+    );
+    assert_eq!(
+        PackedStagingPolicy::label(&config.staging_policy),
+        "godot_owned_packed_byte_array"
+    );
+    assert!(summary.contains("projection=spherified_cube"));
+    assert!(summary.contains("visibility=horizon_frustum_lod"));
+    assert!(summary.contains("render_backend=server_pool_render_backend"));
+    assert!(summary.contains("staging=godot_owned_packed_byte_array"));
+}
+
+#[test]
+fn phase15_projection_strategy_remains_swappable() {
+    let cube_point = DVec3::new(1.0, 0.31, -0.47);
+    let normalized = ProjectionStrategy::project(&CubeProjection::Normalized, cube_point);
+    let spherified = ProjectionStrategy::project(&CubeProjection::Spherified, cube_point);
+
+    assert!((normalized.length() - 1.0).abs() <= 1.0e-12);
+    assert!((spherified.length() - 1.0).abs() <= 1.0e-12);
+    assert!(normalized.distance(spherified) > 1.0e-4);
+}
+
+#[test]
+fn phase15_visibility_strategy_matches_runtime_wrappers() {
+    let mut runtime = test_runtime();
+    let key = ChunkKey::new(Face::Pz, 1, 0, 0);
+    let meta = runtime.ensure_chunk_meta(key).unwrap().clone();
+    let camera = orbit_camera_state();
+    let strategy = runtime.config.visibility_strategy;
+
+    assert_eq!(
+        runtime.horizon_visible(&camera, &meta),
+        strategy.horizon_visible(&runtime.config, &camera, &meta)
+    );
+    assert_eq!(
+        runtime.frustum_visible(&camera, &meta),
+        strategy.frustum_visible(&camera, &meta)
+    );
+    assert_eq!(
+        runtime.projected_error_px(&camera, &meta),
+        strategy.screen_error_px(&camera, &meta)
+    );
 }
 
 #[test]
@@ -1451,4 +1512,25 @@ fn phase8_pool_watermarks_bound_recycled_entries() {
 
     assert_eq!(runtime.render_pool_entry_count(), 1);
     assert_eq!(runtime.physics_pool.len(), 1);
+}
+
+#[test]
+fn phase15_render_backend_can_be_exercised_independently() {
+    let mut runtime = test_runtime();
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
+
+    runtime
+        .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+        .unwrap();
+    frame_state = SelectionFrameState::default();
+
+    let backend = runtime.config.render_backend;
+    assert!(backend.commit_render_payload(&mut runtime, key, &mut frame_state));
+    assert_eq!(frame_state.phase8_render_cold_commits, 1);
+    assert!(runtime.ensure_rid_state(key).render_resident);
+
+    backend.deactivate_render(&mut runtime, key);
+    assert!(!runtime.ensure_rid_state(key).render_resident);
 }

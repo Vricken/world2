@@ -171,7 +171,7 @@ impl PlanetRuntime {
                     .map_err(|_| TopologyError::InvalidChunkKey)?;
                 let face_st = face_uv_to_signed_coords(face_uv);
                 let cube_point = cube_point_for_face(key.face, face_st);
-                sample_dirs.push(CubeProjection::Spherified.project_cube_point(cube_point));
+                sample_dirs.push(self.config.cube_projection.project(cube_point));
             }
         }
 
@@ -201,8 +201,10 @@ impl PlanetRuntime {
                 let face_uv = chunk_uv_to_face_uv(key, chunk_uv)
                     .map_err(|_| TopologyError::InvalidChunkKey)?;
                 let cube_point = cube_point_for_face(key.face, face_uv_to_signed_coords(face_uv));
-                let unit_dir = CubeProjection::Spherified
-                    .project_cube_point(normalize_to_cube_surface(cube_point));
+                let unit_dir = self
+                    .config
+                    .cube_projection
+                    .project(normalize_to_cube_surface(cube_point));
                 let height = self
                     .terrain_settings()
                     .sample_height(unit_dir)
@@ -826,18 +828,8 @@ impl PlanetRuntime {
         _packed_regions: &PackedMeshRegions,
         warm_path: &RenderWarmPath,
     ) -> GdPackedStaging {
-        match warm_path {
-            RenderWarmPath::ReuseCurrentSurface => self
-                .ensure_rid_state(key)
-                .gd_staging
-                .take()
-                .unwrap_or_else(|| GdPackedStaging::new_for_surface_class(surface_class)),
-            RenderWarmPath::ReusePooledSurface(entry) => entry
-                .gd_staging
-                .clone()
-                .unwrap_or_else(|| GdPackedStaging::new_for_surface_class(surface_class)),
-            RenderWarmPath::ColdPath(_) => GdPackedStaging::new_for_surface_class(surface_class),
-        }
+        let policy = self.config.staging_policy;
+        policy.acquire_staging(self, key, surface_class, warm_path)
     }
 
     pub(crate) fn ensure_collision_payload(&mut self, key: ChunkKey) {

@@ -313,6 +313,15 @@ impl PlanetRuntime {
         key: ChunkKey,
         frame_state: &mut SelectionFrameState,
     ) -> bool {
+        let backend = self.config.render_backend;
+        backend.commit_render_payload(self, key, frame_state)
+    }
+
+    pub(crate) fn commit_render_payload_with_server_backend(
+        &mut self,
+        key: ChunkKey,
+        frame_state: &mut SelectionFrameState,
+    ) -> bool {
         let (
             surface_class,
             chunk_origin_planet,
@@ -597,6 +606,11 @@ impl PlanetRuntime {
     }
 
     fn deactivate_render_commit(&mut self, key: ChunkKey) {
+        let backend = self.config.render_backend;
+        backend.deactivate_render(self, key);
+    }
+
+    pub(crate) fn deactivate_render_commit_with_server_backend(&mut self, key: ChunkKey) {
         if let Some(entry) = self.take_current_render_entry(key) {
             self.recycle_render_entry(entry);
         }
@@ -735,14 +749,8 @@ impl PlanetRuntime {
         packed_regions: Option<&PackedMeshRegions>,
         surface_class: &SurfaceClassKey,
     ) -> Option<GdPackedStaging> {
-        let mut staging =
-            staging.unwrap_or_else(|| GdPackedStaging::new_for_surface_class(surface_class));
-        if let Some(packed_regions) = packed_regions {
-            staging
-                .copy_from_regions(packed_regions, surface_class)
-                .ok()?;
-        }
-        Some(staging)
+        let policy = self.config.staging_policy;
+        policy.fill_staging_from_payload(staging, packed_regions, surface_class)
     }
 
     pub(crate) fn reclaim_payload_resources(&mut self, mut payload: ChunkPayload) {
@@ -948,47 +956,21 @@ impl PlanetRuntime {
     }
 
     pub(crate) fn horizon_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {
-        let camera_distance = camera.position_planet.length().max(f64::EPSILON);
-        let occluder_radius = (self.config.planet_radius - self.config.height_amplitude).max(1.0);
-        let beta_camera = if camera_distance <= occluder_radius {
-            std::f64::consts::PI
-        } else {
-            (occluder_radius / camera_distance).clamp(-1.0, 1.0).acos()
-        };
-        let chunk_max_radius = meta.bounds.max_radius.max(occluder_radius);
-        let beta_chunk = if chunk_max_radius <= occluder_radius {
-            0.0
-        } else {
-            (occluder_radius / chunk_max_radius).clamp(-1.0, 1.0).acos()
-        };
-        let angular_slack = (self.config.horizon_safety_margin
-            / camera_distance.max(chunk_max_radius))
-        .clamp(0.0, std::f64::consts::FRAC_PI_2);
-        let theta = camera
-            .position_planet
-            .normalize_or_zero()
-            .angle_between(meta.bounds.center_planet.normalize_or_zero());
-
-        theta <= beta_camera + beta_chunk + f64::from(meta.metrics.angular_radius) + angular_slack
+        self.config
+            .visibility_strategy
+            .horizon_visible(&self.config, camera, meta)
     }
 
     pub(crate) fn frustum_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {
-        let center =
-            dvec3_to_vector3(meta.bounds.center_planet - camera.origin.render_origin_planet);
-        let radius = meta.bounds.radius as f32;
-
-        camera
-            .frustum_planes
-            .iter()
-            .all(|plane| plane.distance_to(center) <= radius)
+        self.config
+            .visibility_strategy
+            .frustum_visible(camera, meta)
     }
 
     pub(crate) fn projected_error_px(&self, camera: &CameraState, meta: &ChunkMeta) -> f32 {
-        let distance = self
-            .chunk_camera_distance(camera, meta)
-            .max(f64::from(f32::EPSILON));
-
-        (f64::from(meta.metrics.geometric_error) * camera.projection_scale / distance) as f32
+        self.config
+            .visibility_strategy
+            .screen_error_px(camera, meta)
     }
 
     pub(crate) fn chunk_camera_distance(&self, camera: &CameraState, meta: &ChunkMeta) -> f64 {

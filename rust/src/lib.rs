@@ -44,9 +44,10 @@ impl INode3D for PlanetRoot {
         let seam = self.runtime.seam_debug_snapshot();
         let assets = self.runtime.asset_debug_snapshot();
         let build_order = self.runtime.build_order_summary();
+        let strategies = self.runtime.strategy_summary();
 
         godot_print!(
-            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} next_phase={}",
+            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
             CURRENT_IMPLEMENTED_PHASE_LABEL,
             self.has_cached_world_rids(),
             self.runtime.origin_mode_label(),
@@ -70,6 +71,7 @@ impl INode3D for PlanetRoot {
             seam.active_stitch_mask_summary(),
             seam.pooled_stitch_mask_summary(),
             build_order,
+            strategies,
             NEXT_PHASE_LABEL
         );
     }
@@ -108,8 +110,9 @@ impl INode3D for PlanetRoot {
             let frame = self.runtime.frame_state();
             let seam = self.runtime.seam_debug_snapshot();
             let assets = self.runtime.asset_debug_snapshot();
+            let strategies = self.runtime.strategy_summary();
             godot_print!(
-                "PlanetRoot phase{} tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_jobs={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={} build_order_steps={} next_phase={}",
+                "PlanetRoot phase{} tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_jobs={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={} build_order_steps={} strategy_summary={} next_phase={}",
                 CURRENT_IMPLEMENTED_PHASE,
                 frame.tick,
                 self.runtime.meta_count(),
@@ -168,6 +171,7 @@ impl INode3D for PlanetRoot {
                 frame.upload_bytes_deferred,
                 frame.max_deferred_starvation_frames,
                 PlanetRuntime::build_order_stage_count(),
+                strategies,
                 NEXT_PHASE_LABEL,
             );
         }
@@ -333,6 +337,12 @@ impl PlanetRoot {
     #[func]
     fn runtime_build_order_summary(&self) -> GString {
         let summary = self.runtime.build_order_summary();
+        GString::from(summary.as_str())
+    }
+
+    #[func]
+    fn runtime_strategy_summary(&self) -> GString {
+        let summary = self.runtime.strategy_summary();
         GString::from(summary.as_str())
     }
 
