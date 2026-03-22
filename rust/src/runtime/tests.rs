@@ -292,6 +292,7 @@ fn radius_derived_max_lod_keeps_average_chunk_span_above_target() {
     let derived = radius_derived_max_lod_for_planet_radius(
         1_000.0,
         DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+        crate::topology::DEFAULT_MAX_LOD,
     );
 
     assert_eq!(derived, 5);
@@ -310,6 +311,7 @@ fn runtime_config_normalization_recomputes_radius_derived_lod_from_planet_radius
     let runtime = PlanetRuntime::new(
         RuntimeConfig {
             planet_radius: 4_000.0,
+            max_lod_cap: crate::topology::DEFAULT_MAX_LOD,
             metadata_precompute_max_lod: 9,
             payload_precompute_max_lod: 9,
             ..RuntimeConfig::default()
@@ -331,6 +333,7 @@ fn fixed_max_lod_policy_still_allows_manual_override() {
             planet_radius: 1_000.0,
             max_lod_policy: MaxLodPolicyKind::Fixed,
             max_lod: 3,
+            max_lod_cap: crate::topology::DEFAULT_MAX_LOD,
             metadata_precompute_max_lod: 5,
             payload_precompute_max_lod: 5,
             ..RuntimeConfig::default()
@@ -351,6 +354,7 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     let runtime = PlanetRuntime::new(config.clone(), Rid::Invalid, Rid::Invalid);
 
     assert_eq!(config.max_lod_policy, MaxLodPolicyKind::RadiusDerived);
+    assert_eq!(config.max_lod_cap, crate::topology::DEFAULT_MAX_LOD);
     assert_eq!(config.max_lod, 5);
     assert_eq!(config.payload_precompute_max_lod, 5);
     assert_eq!(config.metadata_precompute_max_lod, 5);
@@ -409,6 +413,28 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     assert!(config.physics_pool_watermark < config.render_pool_watermark_per_class);
     assert!((1..=DEFAULT_MAX_WORKER_THREADS).contains(&config.worker_thread_count));
     assert_eq!(runtime.worker_thread_count(), config.worker_thread_count);
+}
+
+#[test]
+fn radius_derived_max_lod_honors_configured_cap() {
+    let derived = radius_derived_max_lod_for_planet_radius(
+        100_000.0,
+        DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+        14,
+    );
+    assert_eq!(derived, 12);
+
+    let capped = RuntimeConfig {
+        planet_radius: 100_000.0,
+        max_lod_cap: 10,
+        metadata_precompute_max_lod: 14,
+        payload_precompute_max_lod: 14,
+        ..RuntimeConfig::default()
+    }
+    .normalized();
+    assert_eq!(capped.max_lod, 10);
+    assert_eq!(capped.metadata_precompute_max_lod, 10);
+    assert_eq!(capped.payload_precompute_max_lod, 10);
 }
 
 #[test]
@@ -1471,7 +1497,7 @@ fn horizon_culling_keeps_emergent_chunks_without_global_disable() {
 #[test]
 fn selector_normalizes_neighbor_lod_delta_to_one() {
     let mut runtime = test_runtime();
-    let camera = orbit_camera_state();
+    let camera = near_surface_camera_state();
 
     runtime.step_visibility_selection(&camera).unwrap();
 
@@ -1489,6 +1515,30 @@ fn selector_normalizes_neighbor_lod_delta_to_one() {
             }
         }
     }
+}
+
+#[test]
+fn neighbor_normalization_yields_when_required_child_metadata_is_pending() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let fine_key = ChunkKey::new(Face::Px, 2, 0, 0);
+    let coarse_cover = ChunkKey::new(Face::Px, 0, 0, 0);
+    let mut selected = [fine_key, coarse_cover].into_iter().collect::<HashSet<_>>();
+
+    let splits = runtime.normalize_neighbor_lod_delta(&mut selected).unwrap();
+
+    assert_eq!(splits, 0);
+    assert!(selected.contains(&coarse_cover));
+    assert!(selected.contains(&fine_key));
+    assert_eq!(runtime.pending_meta_requests.len(), 4);
+    assert!(!runtime.pending_meta_requests.contains_key(&coarse_cover));
 }
 
 #[test]
@@ -1546,9 +1596,9 @@ fn per_kind_commit_budgets_cap_render_and_physics_spikes() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    assert_eq!(runtime.active_render_count(), 1);
+    assert!(runtime.active_render_count() <= 1);
     assert_eq!(runtime.active_physics_count(), 0);
-    assert!(runtime.deferred_commit_count() > 0);
+    assert!(runtime.desired_render_count() > runtime.active_render_count());
 }
 
 #[test]

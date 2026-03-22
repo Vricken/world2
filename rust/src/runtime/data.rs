@@ -700,6 +700,7 @@ pub enum MaxLodPolicyKind {
 pub struct RuntimeConfig {
     pub max_lod_policy: MaxLodPolicyKind,
     pub max_lod: u8,
+    pub max_lod_cap: u8,
     pub metadata_precompute_max_lod: u8,
     pub payload_precompute_max_lod: u8,
     pub worker_thread_count: usize,
@@ -738,12 +739,14 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn normalized(mut self) -> Self {
+        self.max_lod_cap = self.max_lod_cap.min(topology::MAX_SUPPORTED_MAX_LOD);
         self.max_lod = match self.max_lod_policy {
             MaxLodPolicyKind::RadiusDerived => radius_derived_max_lod_for_planet_radius(
                 self.planet_radius,
                 DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+                self.max_lod_cap,
             ),
-            MaxLodPolicyKind::Fixed => self.max_lod.min(topology::DEFAULT_MAX_LOD),
+            MaxLodPolicyKind::Fixed => self.max_lod.min(self.max_lod_cap),
         };
         self.metadata_precompute_max_lod = self.metadata_precompute_max_lod.min(self.max_lod);
         self.payload_precompute_max_lod = self.payload_precompute_max_lod.min(self.max_lod);
@@ -760,11 +763,13 @@ impl Default for RuntimeConfig {
         let max_lod = radius_derived_max_lod_for_planet_radius(
             terrain.planet_radius,
             DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+            topology::DEFAULT_MAX_LOD,
         );
 
         Self {
             max_lod_policy: MaxLodPolicyKind::RadiusDerived,
             max_lod,
+            max_lod_cap: topology::DEFAULT_MAX_LOD,
             metadata_precompute_max_lod: DEFAULT_METADATA_PRECOMPUTE_MAX_LOD.min(max_lod),
             payload_precompute_max_lod: PAYLOAD_PRECOMPUTE_MAX_LOD.min(max_lod),
             worker_thread_count,

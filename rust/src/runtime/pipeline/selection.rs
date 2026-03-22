@@ -531,7 +531,7 @@ impl PlanetRuntime {
         }
     }
 
-    fn normalize_neighbor_lod_delta(
+    pub(crate) fn normalize_neighbor_lod_delta(
         &mut self,
         selected: &mut HashSet<ChunkKey>,
     ) -> Result<usize, TopologyError> {
@@ -558,6 +558,7 @@ impl PlanetRuntime {
                 break;
             }
 
+            let mut progressed_this_pass = false;
             for coarse_key in split_targets {
                 if !selected.remove(&coarse_key) {
                     continue;
@@ -580,7 +581,12 @@ impl PlanetRuntime {
                     selected.insert(coarse_key);
                 } else {
                     splits_applied += 1;
+                    progressed_this_pass = true;
                 }
+            }
+
+            if !progressed_this_pass {
+                break;
             }
         }
 

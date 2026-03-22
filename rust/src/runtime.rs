@@ -250,6 +250,7 @@ pub fn average_chunk_surface_span_meters(planet_radius: f64, lod: u8) -> f64 {
 pub fn radius_derived_max_lod_for_planet_radius(
     planet_radius: f64,
     min_average_chunk_surface_span_meters: f64,
+    max_lod_cap: u8,
 ) -> u8 {
     if !planet_radius.is_finite()
         || planet_radius <= 0.0
@@ -260,7 +261,8 @@ pub fn radius_derived_max_lod_for_planet_radius(
     }
 
     let mut derived_max_lod = 0;
-    for lod in 0..=topology::DEFAULT_MAX_LOD {
+    let capped_max_lod = max_lod_cap.min(topology::MAX_SUPPORTED_MAX_LOD);
+    for lod in 0..=capped_max_lod {
         let average_span = average_chunk_surface_span_meters(planet_radius, lod);
         if average_span < min_average_chunk_surface_span_meters {
             break;

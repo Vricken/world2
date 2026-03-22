@@ -3,43 +3,68 @@ pub mod mesh_topology;
 pub mod runtime;
 pub mod topology;
 
-use godot::classes::{INode3D, Node3D};
+use godot::classes::{CharacterBody3D, INode3D, Node, Node3D};
+use godot::classes::{Engine, MeshInstance3D, ProjectSettings, SphereMesh};
+use godot::builtin::{VarDictionary, VariantType};
+use godot::init::InitStage;
 use godot::prelude::*;
+use godot::register::info::PropertyHint;
 use mesh_topology::{
     canonical_chunk_topology, SAMPLED_VERTICES_PER_EDGE, STITCH_VARIANT_COUNT,
     VISIBLE_VERTICES_PER_EDGE,
 };
 use runtime::{
     CameraState, PlanetRuntime, CURRENT_IMPLEMENTED_PHASE, CURRENT_IMPLEMENTED_PHASE_LABEL,
-    DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS, NEXT_PHASE_LABEL,
+    DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS, NEXT_PHASE_LABEL, RuntimeConfig,
 };
-use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT};
+use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT, MAX_SUPPORTED_MAX_LOD};
+
+const PROJECT_SETTING_MAX_LOD_CAP: &str = "world2/runtime/max_lod_cap";
+const EDITOR_PREVIEW_NODE_NAME: &str = "__World2EditorPreview";
 
 #[derive(GodotClass)]
-#[class(base = Node3D)]
+#[class(tool, base = Node3D)]
 pub struct PlanetRoot {
     base: Base<Node3D>,
     cached_scenario_rid: Option<Rid>,
     cached_physics_space_rid: Option<Rid>,
     runtime: PlanetRuntime,
     runtime_tick_count: u64,
+    #[export]
+    planet_radius: f64,
+    editor_preview_radius_applied: f64,
+    editor_preview: Option<Gd<MeshInstance3D>>,
 }
 
 #[godot_api]
 impl INode3D for PlanetRoot {
     fn init(base: Base<Node3D>) -> Self {
+        let runtime = PlanetRuntime::default();
         Self {
             base,
             cached_scenario_rid: None,
             cached_physics_space_rid: None,
-            runtime: PlanetRuntime::default(),
+            planet_radius: runtime.config.planet_radius,
+            runtime,
             runtime_tick_count: 0,
+            editor_preview_radius_applied: -1.0,
+            editor_preview: None,
         }
     }
 
     fn ready(&mut self) {
-        self.base_mut().set_process(true);
+        if self.is_editor_context() {
+            self.base_mut().set_process(true);
+            self.base_mut().set_physics_process(false);
+            self.sync_editor_preview();
+            return;
+        }
+
+        self.remove_runtime_preview_node();
+        self.base_mut().set_process(false);
+        self.base_mut().set_physics_process(true);
         self.cache_world_rids();
+        self.rebuild_runtime();
         self.apply_runtime_origin_shift();
         let seam = self.runtime.seam_debug_snapshot();
         let assets = self.runtime.asset_debug_snapshot();
@@ -47,13 +72,15 @@ impl INode3D for PlanetRoot {
         let strategies = self.runtime.strategy_summary();
 
         godot_print!(
-            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} runtime_max_lod={} meta_precompute_max_lod={} payload_precompute_max_lod={} min_avg_chunk_span_m={} worker_threads={} prebuilt_meta={} edge_xforms={} topology_supported_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
+            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} planet_radius={} runtime_max_lod={} runtime_max_lod_cap={} meta_precompute_max_lod={} payload_precompute_max_lod={} min_avg_chunk_span_m={} worker_threads={} prebuilt_meta={} edge_xforms={} topology_default_max_lod={} topology_supported_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
             CURRENT_IMPLEMENTED_PHASE_LABEL,
             self.has_cached_world_rids(),
             self.runtime.origin_mode_label(),
             self.runtime.config.use_large_world_coordinates,
             self.runtime.config.origin_recenter_distance,
+            self.runtime.config.planet_radius,
             self.runtime.config.max_lod,
+            self.runtime.config.max_lod_cap,
             self.runtime.metadata_precompute_max_lod(),
             self.runtime.payload_precompute_max_lod(),
             DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
@@ -61,6 +88,7 @@ impl INode3D for PlanetRoot {
             self.runtime.meta_count(),
             DIRECTED_EDGE_TRANSFORM_COUNT,
             DEFAULT_MAX_LOD,
+            MAX_SUPPORTED_MAX_LOD,
             VISIBLE_VERTICES_PER_EDGE,
             SAMPLED_VERTICES_PER_EDGE,
             STITCH_VARIANT_COUNT,
@@ -79,11 +107,29 @@ impl INode3D for PlanetRoot {
     }
 
     fn exit_tree(&mut self) {
+        if self.is_editor_context() {
+            self.teardown_editor_preview();
+            self.base_mut().set_process(false);
+            self.base_mut().set_physics_process(false);
+            return;
+        }
         self.runtime.release_server_resources();
         self.base_mut().set_process(false);
+        self.base_mut().set_physics_process(false);
     }
 
     fn process(&mut self, _delta: f64) {
+        if self.is_editor_context() {
+            self.sync_editor_preview();
+            return;
+        }
+    }
+
+    fn physics_process(&mut self, _delta: f64) {
+        if self.is_editor_context() {
+            return;
+        }
+
         self.runtime_tick_count = self.runtime_tick_count.saturating_add(1);
 
         if self.runtime_tick_count == 1 || self.runtime_tick_count % 300 == 0 {
@@ -187,6 +233,164 @@ impl INode3D for PlanetRoot {
 
 #[godot_api]
 impl PlanetRoot {
+    fn is_editor_context(&self) -> bool {
+        Engine::singleton().is_editor_hint()
+    }
+
+    fn rebuild_runtime(&mut self) {
+        self.runtime.release_server_resources();
+        self.runtime = PlanetRuntime::new(
+            self.effective_runtime_config(),
+            self.cached_scenario_rid.unwrap_or(Rid::Invalid),
+            self.cached_physics_space_rid.unwrap_or(Rid::Invalid),
+        );
+        self.runtime_tick_count = 0;
+    }
+
+    fn effective_runtime_config(&self) -> RuntimeConfig {
+        let mut config = RuntimeConfig::default();
+        config.planet_radius = self.planet_radius.max(1.0);
+        config.max_lod_cap = Self::project_max_lod_cap();
+        config
+    }
+
+    fn project_max_lod_cap() -> u8 {
+        let mut settings = ProjectSettings::singleton();
+        let has_setting = settings
+            .call("has_setting", &[PROJECT_SETTING_MAX_LOD_CAP.to_variant()])
+            .to::<bool>();
+        if !has_setting {
+            return DEFAULT_MAX_LOD;
+        }
+        let raw = settings
+            .get(PROJECT_SETTING_MAX_LOD_CAP)
+            .to::<i64>()
+            .clamp(0, i64::from(MAX_SUPPORTED_MAX_LOD));
+        raw as u8
+    }
+
+    fn sync_editor_preview(&mut self) {
+        self.editor_preview = self.prune_editor_preview_nodes();
+        let radius = self.planet_radius.max(1.0);
+        if (self.editor_preview_radius_applied - radius).abs() <= f64::EPSILON
+            && self.editor_preview.is_some()
+        {
+            return;
+        }
+
+        let mut preview = self.ensure_editor_preview();
+        self.assign_editor_preview_owner(&mut preview);
+        let mut mesh = SphereMesh::new_gd();
+        mesh.set_radius(radius as f32);
+        mesh.set_height((radius * 2.0) as f32);
+        preview.set_name(EDITOR_PREVIEW_NODE_NAME);
+        preview.set("mesh", &mesh.to_variant());
+        preview.set_visible(true);
+        self.editor_preview_radius_applied = radius;
+    }
+
+    fn ensure_editor_preview(&mut self) -> Gd<MeshInstance3D> {
+        if let Some(preview) = self.editor_preview.as_ref() {
+            return preview.clone();
+        }
+
+        if let Some(preview) = self.find_editor_preview_node() {
+            self.editor_preview = Some(preview.clone());
+            return preview;
+        }
+
+        let mut preview = MeshInstance3D::new_alloc();
+        preview.set_name(EDITOR_PREVIEW_NODE_NAME);
+        self.base_mut().add_child(&preview);
+        self.assign_editor_preview_owner(&mut preview);
+        self.editor_preview = Some(preview.clone());
+        preview
+    }
+
+    fn assign_editor_preview_owner(&self, preview: &mut Gd<MeshInstance3D>) {
+        let owner = self
+            .base()
+            .get_tree()
+            .get_edited_scene_root()
+            .or_else(|| Some(self.base().clone().upcast::<Node>()));
+        if let Some(owner) = owner {
+            preview.set_owner(&owner);
+        }
+    }
+
+    fn find_editor_preview_node(&self) -> Option<Gd<MeshInstance3D>> {
+        let child_count = self.base().get_child_count();
+        for child_index in 0..child_count {
+            let Some(child) = self.base().get_child(child_index) else {
+                continue;
+            };
+            if child.get_name().to_string() != EDITOR_PREVIEW_NODE_NAME {
+                continue;
+            }
+            if let Ok(preview) = child.try_cast::<MeshInstance3D>() {
+                return Some(preview);
+            }
+        }
+        None
+    }
+
+    fn prune_editor_preview_nodes(&mut self) -> Option<Gd<MeshInstance3D>> {
+        let child_count = self.base().get_child_count();
+        let mut kept_preview = None;
+        let mut duplicate_children = Vec::new();
+
+        for child_index in 0..child_count {
+            let Some(child) = self.base().get_child(child_index) else {
+                continue;
+            };
+            if child.get_name().to_string() != EDITOR_PREVIEW_NODE_NAME {
+                continue;
+            }
+
+            match child.clone().try_cast::<MeshInstance3D>() {
+                Ok(preview) if kept_preview.is_none() => {
+                    kept_preview = Some(preview);
+                }
+                Ok(_) | Err(_) => duplicate_children.push(child),
+            }
+        }
+
+        for mut child in duplicate_children {
+            self.base_mut().remove_child(&child);
+            child.queue_free();
+        }
+
+        kept_preview
+    }
+
+    fn remove_runtime_preview_node(&mut self) {
+        self.editor_preview = None;
+        let child_count = self.base().get_child_count();
+        let mut to_remove = Vec::new();
+
+        for child_index in 0..child_count {
+            let Some(child) = self.base().get_child(child_index) else {
+                continue;
+            };
+            if child.get_name().to_string() == EDITOR_PREVIEW_NODE_NAME {
+                to_remove.push(child);
+            }
+        }
+
+        for mut child in to_remove {
+            self.base_mut().remove_child(&child);
+            child.queue_free();
+        }
+        self.editor_preview_radius_applied = -1.0;
+    }
+
+    fn teardown_editor_preview(&mut self) {
+        if let Some(mut preview) = self.editor_preview.take() {
+            preview.queue_free();
+        }
+        self.editor_preview_radius_applied = -1.0;
+    }
+
     #[func]
     fn has_cached_world_rids(&self) -> bool {
         self.cached_scenario_rid.is_some() && self.cached_physics_space_rid.is_some()
@@ -275,6 +479,11 @@ impl PlanetRoot {
     #[func]
     fn runtime_max_lod(&self) -> i64 {
         self.runtime.config.max_lod as i64
+    }
+
+    #[func]
+    fn runtime_max_lod_cap(&self) -> i64 {
+        self.runtime.config.max_lod_cap as i64
     }
 
     #[func]
@@ -373,9 +582,11 @@ impl PlanetRoot {
         let camera_position_planet = self
             .runtime
             .camera_planet_position_from_render(raw.transform.origin);
-        self.runtime
-            .update_origin_from_camera(camera_position_planet);
-        self.apply_runtime_origin_shift();
+        if !self.should_defer_origin_shift_for_collision() {
+            self.runtime
+                .update_origin_from_camera(camera_position_planet);
+            self.apply_runtime_origin_shift();
+        }
 
         let raw = self.acquire_raw_camera_state()?;
         Some(CameraState::from_godot(
@@ -434,9 +645,36 @@ impl PlanetRoot {
         self.runtime.set_world_rids(scenario_rid, physics_space_rid);
     }
 
+    fn should_defer_origin_shift_for_collision(&self) -> bool {
+        let Some(viewport) = self.base().get_viewport() else {
+            return false;
+        };
+        let Some(camera) = viewport.get_camera_3d() else {
+            return false;
+        };
+
+        let mut current = camera.get_parent();
+        while let Some(node) = current {
+            if let Ok(body) = node.clone().try_cast::<CharacterBody3D>() {
+                return body.get_slide_collision_count() > 0
+                    || body.is_on_floor()
+                    || body.is_on_wall()
+                    || body.is_on_ceiling();
+            }
+            current = node.get_parent();
+        }
+
+        false
+    }
+
     fn apply_runtime_origin_shift(&mut self) {
         let root_position = self.runtime.root_scene_position();
+        let current_position = self.base().get_position();
+        if (current_position - root_position).length_squared() <= 1.0e-10 {
+            return;
+        }
         self.base_mut().set_position(root_position);
+        self.base_mut().reset_physics_interpolation();
     }
 }
 
@@ -449,5 +687,44 @@ struct RawCameraState {
 
 struct World2Extension;
 
+fn register_world2_project_settings() {
+    let mut settings = ProjectSettings::singleton();
+    let default_cap = i64::from(DEFAULT_MAX_LOD);
+    let has_setting = settings
+        .call("has_setting", &[PROJECT_SETTING_MAX_LOD_CAP.to_variant()])
+        .to::<bool>();
+
+    if !has_setting {
+        settings.set(PROJECT_SETTING_MAX_LOD_CAP, &default_cap.to_variant());
+    }
+
+    let mut info = VarDictionary::new();
+    info.set("name", PROJECT_SETTING_MAX_LOD_CAP);
+    info.set("type", VariantType::INT);
+    info.set("hint", PropertyHint::RANGE);
+    info.set(
+        "hint_string",
+        format!("0,{},1", MAX_SUPPORTED_MAX_LOD),
+    );
+    settings.call("add_property_info", &[info.to_variant()]);
+    settings.call(
+        "set_initial_value",
+        &[
+            PROJECT_SETTING_MAX_LOD_CAP.to_variant(),
+            default_cap.to_variant(),
+        ],
+    );
+    settings.call(
+        "set_as_basic",
+        &[PROJECT_SETTING_MAX_LOD_CAP.to_variant(), true.to_variant()],
+    );
+}
+
 #[gdextension]
-unsafe impl ExtensionLibrary for World2Extension {}
+unsafe impl ExtensionLibrary for World2Extension {
+    fn on_stage_init(stage: InitStage) {
+        if stage == InitStage::Scene {
+            register_world2_project_settings();
+        }
+    }
+}

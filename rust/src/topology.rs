@@ -6,6 +6,7 @@ use crate::geometry::{face_basis, FACE_COORD_EPSILON};
 use crate::runtime::{ChunkKey, ChunkNeighbors, Edge, Face};
 
 pub const DEFAULT_MAX_LOD: u8 = 10;
+pub const MAX_SUPPORTED_MAX_LOD: u8 = 16;
 pub const DIRECTED_EDGE_TRANSFORM_COUNT: usize = Face::ALL.len() * Edge::ALL.len();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
