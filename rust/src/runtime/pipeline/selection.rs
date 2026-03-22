@@ -93,7 +93,7 @@ impl PlanetRuntime {
                 continue;
             }
             self.pending_meta_requests.remove(&prepared.key);
-            self.meta.insert(prepared.key, prepared.meta);
+            let _ = self.meta.insert_chunk_meta(prepared.meta, true);
         }
     }
 
@@ -460,7 +460,7 @@ impl PlanetRuntime {
         split_ancestors: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
     ) -> Result<(), TopologyError> {
-        let meta = self.ensure_chunk_meta(key)?.clone();
+        let meta = self.ensure_chunk_meta(key)?;
 
         if !self.horizon_visible(camera, &meta) {
             return Ok(());
@@ -539,6 +539,7 @@ impl PlanetRuntime {
 
         loop {
             let mut split_targets = HashSet::new();
+            let mut collapse_targets = HashSet::new();
 
             for key in selected.iter().copied().collect::<Vec<_>>() {
                 for edge in Edge::ALL {
@@ -548,13 +549,30 @@ impl PlanetRuntime {
                         Self::find_active_ancestor_covering(neighbor_same_lod, selected)
                     {
                         if key.lod > active_ancestor.lod + 1 {
-                            split_targets.insert(active_ancestor);
+                            let coarse_children = active_ancestor
+                                .children()
+                                .expect("normalization only splits non-leaf chunks");
+                            let mut coarse_children_ready = true;
+                            for child in coarse_children {
+                                if !self.meta.contains_key(&child) {
+                                    self.request_chunk_meta_if_missing(child);
+                                    coarse_children_ready = false;
+                                }
+                            }
+
+                            if coarse_children_ready {
+                                split_targets.insert(active_ancestor);
+                            } else if let Some(collapse_target) =
+                                key.ancestor_at_lod(active_ancestor.lod + 1)
+                            {
+                                collapse_targets.insert(collapse_target);
+                            }
                         }
                     }
                 }
             }
 
-            if split_targets.is_empty() {
+            if split_targets.is_empty() && collapse_targets.is_empty() {
                 break;
             }
 
@@ -583,6 +601,22 @@ impl PlanetRuntime {
                     splits_applied += 1;
                     progressed_this_pass = true;
                 }
+            }
+
+            for collapse_target in collapse_targets {
+                let descendants = selected
+                    .iter()
+                    .copied()
+                    .filter(|candidate| candidate.is_descendant_of(&collapse_target))
+                    .collect::<Vec<_>>();
+                if descendants.is_empty() {
+                    continue;
+                }
+
+                for descendant in descendants {
+                    selected.remove(&descendant);
+                }
+                progressed_this_pass |= selected.insert(collapse_target);
             }
 
             if !progressed_this_pass {
@@ -615,7 +649,7 @@ impl PlanetRuntime {
         let mut candidates = Vec::with_capacity(render_keys.len());
 
         for key in render_keys {
-            let meta = self.ensure_chunk_meta(key)?.clone();
+            let meta = self.ensure_chunk_meta(key)?;
             let distance = self.chunk_camera_distance(camera, &meta);
             candidates.push((key, distance));
         }
@@ -647,7 +681,7 @@ impl PlanetRuntime {
         key: ChunkKey,
         desired_render: &HashSet<ChunkKey>,
     ) -> Result<SurfaceClassKey, TopologyError> {
-        let meta = self.ensure_chunk_meta(key)?.clone();
+        let meta = self.ensure_chunk_meta(key)?;
         let mut neighbor_lods = [key.lod; Edge::ALL.len()];
 
         for (index, edge) in Edge::ALL.into_iter().enumerate() {

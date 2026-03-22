@@ -278,7 +278,7 @@ pub struct PlanetRuntime {
     pub config: RuntimeConfig,
     pub scenario_rid: Rid,
     pub physics_space_rid: Rid,
-    pub meta: HashMap<ChunkKey, ChunkMeta>,
+    pub meta: MetadataStore,
     pub active_render: HashSet<ChunkKey>,
     pub active_physics: HashSet<ChunkKey>,
     pub resident_payloads: HashMap<ChunkKey, ChunkPayload>,

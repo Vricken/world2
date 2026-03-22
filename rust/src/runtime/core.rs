@@ -9,6 +9,7 @@ impl Default for PlanetRuntime {
 impl PlanetRuntime {
     pub fn new(config: RuntimeConfig, scenario_rid: Rid, physics_space_rid: Rid) -> Self {
         let config = config.normalized();
+        let metadata_max_lod = config.max_lod;
         let mut runtime = Self {
             threaded_payload_generator: ThreadedPayloadGenerator::new(config.worker_thread_count),
             threaded_metadata_generator: ThreadedMetadataGenerator::new(config.worker_thread_count),
@@ -17,7 +18,7 @@ impl PlanetRuntime {
             config,
             scenario_rid,
             physics_space_rid,
-            meta: HashMap::new(),
+            meta: MetadataStore::new(metadata_max_lod),
             active_render: HashSet::new(),
             active_physics: HashSet::new(),
             resident_payloads: HashMap::new(),
@@ -117,45 +118,57 @@ impl PlanetRuntime {
     pub fn build_metadata_tree_through_lod(&mut self, max_lod: u8) -> Result<usize, TopologyError> {
         let mut inserted = 0usize;
 
-        for face in Face::ALL {
-            for lod in 0..=max_lod.min(self.config.max_lod) {
+        for lod in 0..=max_lod.min(self.config.max_lod) {
+            if self.meta.level_is_built(lod) {
+                continue;
+            }
+            for face in Face::ALL {
                 let resolution = ChunkKey::resolution_for_lod(lod);
+                let mut entries = Vec::with_capacity((resolution * resolution) as usize);
                 for y in 0..resolution {
                     for x in 0..resolution {
                         let key = ChunkKey::new(face, lod, x, y);
-                        if self.meta.contains_key(&key) {
-                            continue;
-                        }
-
                         let meta = self.build_chunk_meta(key)?;
-                        self.meta.insert(key, meta);
+                        entries.push(StoredChunkMeta::from_chunk_meta(&meta));
                         inserted += 1;
                     }
                 }
+                self.meta.set_face_level(face, lod, entries)?;
             }
         }
 
         Ok(inserted)
     }
 
-    pub fn ensure_chunk_meta(&mut self, key: ChunkKey) -> Result<&ChunkMeta, TopologyError> {
+    pub fn ensure_chunk_meta(&mut self, key: ChunkKey) -> Result<ChunkMeta, TopologyError> {
         if !self.meta.contains_key(&key) {
             let meta = self.build_chunk_meta(key)?;
-            self.meta.insert(key, meta);
+            self.meta.insert_chunk_meta(meta, true)?;
         }
 
-        Ok(self
+        self
             .meta
-            .get(&key)
-            .expect("chunk metadata must exist after ensure_chunk_meta"))
+            .get_chunk_meta(key, self.base_chunk_surface_class()?)?
+            .ok_or(TopologyError::InvalidChunkKey)
     }
 
     pub fn register_chunk_meta(
         &mut self,
-        mut meta: ChunkMeta,
+        meta: ChunkMeta,
     ) -> Result<Option<ChunkMeta>, TopologyError> {
-        meta.refresh_same_lod_neighbors()?;
-        Ok(self.meta.insert(meta.key, meta))
+        self.meta.insert_chunk_meta(meta, false)
+    }
+
+    pub fn base_chunk_surface_class(&self) -> Result<SurfaceClassKey, TopologyError> {
+        SurfaceClassKey::canonical_chunk(
+            mesh_topology::BASE_STITCH_MASK,
+            self.config.render_material_class,
+            self.config.render_format_mask,
+            self.config.render_vertex_stride,
+            self.config.render_attribute_stride,
+            self.config.render_index_stride,
+        )
+        .map_err(|_| TopologyError::InvalidChunkKey)
     }
 
     pub fn insert_payload(&mut self, key: ChunkKey, payload: ChunkPayload) -> Option<ChunkPayload> {

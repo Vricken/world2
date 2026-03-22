@@ -263,7 +263,7 @@ fn runtime_map_transitions_are_deterministic() {
     runtime.ensure_rid_state(key).render_resident = true;
     runtime.ensure_rid_state(key).physics_resident = true;
 
-    assert_eq!(runtime.meta_count(), initial_meta_count + 1);
+    assert_eq!(runtime.meta_count(), initial_meta_count);
     assert_eq!(runtime.active_render_count(), 1);
     assert_eq!(runtime.active_physics_count(), 1);
     assert_eq!(runtime.resident_payload_count(), 1);
@@ -519,7 +519,7 @@ fn phase15_projection_strategy_remains_swappable() {
 fn phase15_visibility_strategy_matches_runtime_wrappers() {
     let mut runtime = test_runtime();
     let key = ChunkKey::new(Face::Pz, 1, 0, 0);
-    let meta = runtime.ensure_chunk_meta(key).unwrap().clone();
+    let meta = runtime.ensure_chunk_meta(key).unwrap();
     let camera = orbit_camera_state();
     let strategy = runtime.config.visibility_strategy;
 
@@ -538,7 +538,7 @@ fn phase15_visibility_strategy_matches_runtime_wrappers() {
 }
 
 #[test]
-fn metadata_precompute_window_is_explicit_in_runtime_config() {
+fn metadata_precompute_defaults_to_effective_runtime_max_lod() {
     let runtime = PlanetRuntime::new(
         RuntimeConfig {
             metadata_precompute_max_lod: 2,
@@ -549,8 +549,8 @@ fn metadata_precompute_window_is_explicit_in_runtime_config() {
         Rid::Invalid,
     );
 
-    assert_eq!(runtime.metadata_precompute_max_lod(), 2);
-    assert_eq!(runtime.meta_count(), 6 * (1 + 4 + 16));
+    assert_eq!(runtime.metadata_precompute_max_lod(), runtime.config.max_lod);
+    assert_eq!(runtime.meta_count(), 6 * (1 + 4 + 16 + 64 + 256 + 1024));
 }
 
 #[test]
@@ -1033,7 +1033,7 @@ fn phase12_asset_residency_follows_active_render_chunks() {
     ];
 
     for (fill, key) in keys.into_iter().enumerate() {
-        let meta = runtime.ensure_chunk_meta(key).unwrap().clone();
+        let meta = runtime.ensure_chunk_meta(key).unwrap();
         runtime.insert_payload(
             key,
             ChunkPayload {
@@ -1395,7 +1395,7 @@ fn register_chunk_meta_recomputes_neighbors_from_phase4_topology() {
     let mut runtime = test_runtime();
     runtime.register_chunk_meta(meta).unwrap();
 
-    let stored = runtime.meta.get(&key).unwrap();
+    let stored = runtime.ensure_chunk_meta(key).unwrap();
     assert_eq!(
         stored.neighbors.get(Edge::NegU),
         ChunkKey::new(Face::Pz, 2, 3, 0)
@@ -1415,15 +1415,15 @@ fn register_chunk_meta_recomputes_neighbors_from_phase4_topology() {
 }
 
 #[test]
-fn ensure_chunk_meta_lazily_builds_phase6_bounds_and_surface_class() {
+fn ensure_chunk_meta_returns_prebuilt_bounds_and_surface_class() {
     let mut runtime = test_runtime();
     let key = ChunkKey::new(Face::Pz, 3, 5, 2);
     let initial_meta_count = runtime.meta_count();
 
-    let meta = runtime.ensure_chunk_meta(key).unwrap().clone();
+    let meta = runtime.ensure_chunk_meta(key).unwrap();
 
     assert_eq!(meta.key, key);
-    assert_eq!(runtime.meta_count(), initial_meta_count + 1);
+    assert_eq!(runtime.meta_count(), initial_meta_count);
     assert!(meta.bounds.radius > 0.0);
     assert!(meta.metrics.angular_radius > 0.0);
     assert!(meta.metrics.geometric_error > 0.0);
@@ -1518,7 +1518,7 @@ fn selector_normalizes_neighbor_lod_delta_to_one() {
 }
 
 #[test]
-fn neighbor_normalization_yields_when_required_child_metadata_is_pending() {
+fn neighbor_normalization_splits_coarse_side_when_metadata_is_available() {
     let mut runtime = PlanetRuntime::new(
         RuntimeConfig {
             metadata_precompute_max_lod: 0,
@@ -1528,17 +1528,22 @@ fn neighbor_normalization_yields_when_required_child_metadata_is_pending() {
         Rid::Invalid,
         Rid::Invalid,
     );
-    let fine_key = ChunkKey::new(Face::Px, 2, 0, 0);
-    let coarse_cover = ChunkKey::new(Face::Px, 0, 0, 0);
+    let fine_key = ChunkKey::new(Face::Px, 3, 3, 0);
+    let coarse_cover = ChunkKey::new(Face::Px, 1, 1, 0);
     let mut selected = [fine_key, coarse_cover].into_iter().collect::<HashSet<_>>();
 
     let splits = runtime.normalize_neighbor_lod_delta(&mut selected).unwrap();
 
-    assert_eq!(splits, 0);
-    assert!(selected.contains(&coarse_cover));
+    assert_eq!(splits, 1);
+    assert!(!selected.contains(&coarse_cover));
     assert!(selected.contains(&fine_key));
-    assert_eq!(runtime.pending_meta_requests.len(), 4);
-    assert!(!runtime.pending_meta_requests.contains_key(&coarse_cover));
+    assert_eq!(runtime.pending_meta_requests.len(), 0);
+    assert!(selected
+        .iter()
+        .any(|key| key.lod == 2 && key.is_descendant_of(&coarse_cover)));
+    assert!(runtime
+        .required_surface_class_for_selection(fine_key, &selected)
+        .is_ok());
 }
 
 #[test]

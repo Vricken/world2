@@ -196,7 +196,7 @@ impl PlanetRuntime {
             if !self.payload_matches_selection(key, desired_render)? {
                 continue;
             }
-            let meta = self.ensure_chunk_meta(key)?.clone();
+            let meta = self.ensure_chunk_meta(key)?;
             ops.push(CommitOp {
                 kind: CommitOpKind::ActivateRender,
                 key,
@@ -221,7 +221,7 @@ impl PlanetRuntime {
                 continue;
             }
 
-            let meta = self.ensure_chunk_meta(key)?.clone();
+            let meta = self.ensure_chunk_meta(key)?;
             ops.push(CommitOp {
                 kind: CommitOpKind::UpdateRender,
                 key,
@@ -240,7 +240,7 @@ impl PlanetRuntime {
             if !self.payload_matches_selection(key, desired_render)? {
                 continue;
             }
-            let meta = self.ensure_chunk_meta(key)?.clone();
+            let meta = self.ensure_chunk_meta(key)?;
             let distance = self.chunk_camera_distance(camera, &meta);
             self.ensure_collision_payload(key);
             ops.push(CommitOp {
@@ -259,7 +259,7 @@ impl PlanetRuntime {
             .collect::<Vec<_>>();
         render_deactivations.sort_unstable();
         for key in render_deactivations {
-            let meta = self.ensure_chunk_meta(key)?.clone();
+            let meta = self.ensure_chunk_meta(key)?;
             let distance = self.chunk_camera_distance(camera, &meta);
             ops.push(CommitOp {
                 kind: CommitOpKind::DeactivateRender,
@@ -277,7 +277,7 @@ impl PlanetRuntime {
             .collect::<Vec<_>>();
         physics_deactivations.sort_unstable();
         for key in physics_deactivations {
-            let meta = self.ensure_chunk_meta(key)?.clone();
+            let meta = self.ensure_chunk_meta(key)?;
             let distance = self.chunk_camera_distance(camera, &meta);
             ops.push(CommitOp {
                 kind: CommitOpKind::DeactivatePhysics,
@@ -886,11 +886,7 @@ impl PlanetRuntime {
 
             chunks.push(super::super::workers::asset_groups::AssetGroupChunkInput {
                 key,
-                chunk_origin_planet: self
-                    .meta
-                    .get(&key)
-                    .map(|meta| meta.bounds.center_planet)
-                    .unwrap_or(payload.chunk_origin_planet),
+                chunk_origin_planet: self.meta.center_planet(&key).unwrap_or(payload.chunk_origin_planet),
                 assets: payload.assets.clone(),
             });
 
@@ -898,8 +894,7 @@ impl PlanetRuntime {
                 let group_key =
                     asset_group_key_for_chunk(key, family, self.config.asset_group_chunk_span);
                 let anchor_key = asset_group_anchor_key(group_key, self.config.asset_group_chunk_span);
-                if let Some(origin) = self.meta.get(&anchor_key).map(|meta| meta.bounds.center_planet)
-                {
+                if let Some(origin) = self.meta.center_planet(&anchor_key) {
                     anchor_origins.insert(anchor_key, origin);
                 }
             }
@@ -1114,7 +1109,7 @@ impl PlanetRuntime {
         self.resident_payloads
             .get(&key)
             .map(|payload| payload.chunk_origin_planet)
-            .or_else(|| self.meta.get(&key).map(|meta| meta.bounds.center_planet))
+            .or_else(|| self.meta.center_planet(&key))
     }
 
     fn render_transform_for_chunk(&self, chunk_origin_planet: DVec3) -> Transform3D {

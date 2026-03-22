@@ -202,7 +202,7 @@ pub fn build_desired_asset_groups(
     config: &RuntimeConfig,
     active_render: &HashSet<ChunkKey>,
     resident_payloads: &HashMap<ChunkKey, ChunkPayload>,
-    meta: &HashMap<ChunkKey, ChunkMeta>,
+    meta: &MetadataStore,
 ) -> HashMap<AssetGroupKey, DesiredAssetGroup> {
     let mut groups = HashMap::new();
 
@@ -216,9 +216,8 @@ pub fn build_desired_asset_groups(
             let entry = groups.entry(group_key).or_insert_with(|| {
                 let anchor_key = asset_group_anchor_key(group_key, config.asset_group_chunk_span);
                 let group_origin_planet = meta
-                    .get(&anchor_key)
-                    .map(|meta| meta.bounds.center_planet)
-                    .or_else(|| meta.get(&key).map(|meta| meta.bounds.center_planet))
+                    .center_planet(&anchor_key)
+                    .or_else(|| meta.center_planet(&key))
                     .unwrap_or(asset.origin);
                 DesiredAssetGroup {
                     key: group_key,

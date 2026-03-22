@@ -251,6 +251,7 @@ impl PlanetRoot {
         let mut config = RuntimeConfig::default();
         config.planet_radius = self.planet_radius.max(1.0);
         config.max_lod_cap = Self::project_max_lod_cap();
+        config.metadata_precompute_max_lod = MAX_SUPPORTED_MAX_LOD;
         config
     }
 

@@ -52,6 +52,18 @@ impl ChunkKey {
         (self.lod > 0).then(|| Self::new(self.face, self.lod - 1, self.x / 2, self.y / 2))
     }
 
+    pub fn ancestor_at_lod(&self, target_lod: u8) -> Option<Self> {
+        if target_lod > self.lod {
+            return None;
+        }
+
+        let mut current = *self;
+        while current.lod > target_lod {
+            current = current.parent()?;
+        }
+        Some(current)
+    }
+
     pub fn children(&self) -> Option<[Self; 4]> {
         let child_lod = self.lod.checked_add(1)?;
         let base_x = self.x.checked_mul(2)?;
@@ -75,7 +87,7 @@ impl ChunkKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChunkBounds {
     pub center_planet: DVec3,
     pub radius: f64,
@@ -105,7 +117,7 @@ impl ChunkBounds {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChunkMetrics {
     pub geometric_error: f32,
     pub max_slope_deg: f32,
@@ -294,6 +306,166 @@ impl ChunkMeta {
     pub fn refresh_same_lod_neighbors(&mut self) -> Result<(), TopologyError> {
         self.neighbors = topology::same_lod_neighbors(self.key)?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StoredChunkMeta {
+    pub bounds: ChunkBounds,
+    pub metrics: ChunkMetrics,
+}
+
+impl StoredChunkMeta {
+    pub(crate) fn from_chunk_meta(meta: &ChunkMeta) -> Self {
+        Self {
+            bounds: meta.bounds,
+            metrics: meta.metrics,
+        }
+    }
+
+    pub(crate) fn to_chunk_meta(
+        &self,
+        key: ChunkKey,
+        surface_class: SurfaceClassKey,
+    ) -> Result<ChunkMeta, TopologyError> {
+        Ok(ChunkMeta {
+            key,
+            bounds: self.bounds,
+            metrics: self.metrics,
+            neighbors: topology::same_lod_neighbors(key)?,
+            surface_class,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MetadataStore {
+    levels: Vec<[Vec<Option<StoredChunkMeta>>; 6]>,
+    len: usize,
+}
+
+impl MetadataStore {
+    pub fn new(max_lod: u8) -> Self {
+        let level_count = usize::from(max_lod) + 1;
+        let levels = (0..level_count)
+            .map(|_| std::array::from_fn(|_| Vec::new()))
+            .collect();
+        Self { levels, len: 0 }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn level_is_built(&self, lod: u8) -> bool {
+        self.levels
+            .get(usize::from(lod))
+            .map(|faces| faces.iter().all(|entries| !entries.is_empty()))
+            .unwrap_or(false)
+    }
+
+    pub fn contains_key(&self, key: &ChunkKey) -> bool {
+        self.get_stored(key).is_some()
+    }
+
+    pub fn center_planet(&self, key: &ChunkKey) -> Option<DVec3> {
+        self.get_stored(key).map(|stored| stored.bounds.center_planet)
+    }
+
+    pub fn get_chunk_meta(
+        &self,
+        key: ChunkKey,
+        surface_class: SurfaceClassKey,
+    ) -> Result<Option<ChunkMeta>, TopologyError> {
+        self.get_stored(&key)
+            .map(|stored| stored.to_chunk_meta(key, surface_class))
+            .transpose()
+    }
+
+    pub fn insert_chunk_meta(
+        &mut self,
+        meta: ChunkMeta,
+        prevalidated_neighbors: bool,
+    ) -> Result<Option<ChunkMeta>, TopologyError> {
+        let mut meta = meta;
+        if !prevalidated_neighbors {
+            meta.refresh_same_lod_neighbors()?;
+        }
+
+        let (lod_index, face_index, slot_index, slot_count) =
+            self.slot_components(&meta.key).ok_or(TopologyError::InvalidChunkKey)?;
+        let face_slots = &mut self.levels[lod_index][face_index];
+        if face_slots.is_empty() {
+            face_slots.resize(slot_count, None);
+        }
+
+        let previous = face_slots[slot_index]
+            .replace(StoredChunkMeta::from_chunk_meta(&meta))
+            .map(|stored| stored.to_chunk_meta(meta.key, meta.surface_class.clone()))
+            .transpose()?;
+        if previous.is_none() {
+            self.len += 1;
+        }
+        Ok(previous)
+    }
+
+    pub(crate) fn set_face_level(
+        &mut self,
+        face: Face,
+        lod: u8,
+        entries: Vec<StoredChunkMeta>,
+    ) -> Result<(), TopologyError> {
+        let slot_count = self.face_slot_count(lod);
+        if entries.len() != slot_count {
+            return Err(TopologyError::InvalidChunkKey);
+        }
+
+        let lod_index = usize::from(lod);
+        let face_index = Self::face_index(face);
+        let previous_count = self.levels[lod_index][face_index]
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count();
+        self.len = self.len.saturating_sub(previous_count);
+        self.len += entries.len();
+        self.levels[lod_index][face_index] = entries.into_iter().map(Some).collect();
+        Ok(())
+    }
+
+    fn get_stored(&self, key: &ChunkKey) -> Option<&StoredChunkMeta> {
+        let (lod_index, face_index, slot_index, _) = self.slot_components(key)?;
+        self.levels
+            .get(lod_index)?
+            .get(face_index)?
+            .get(slot_index)?
+            .as_ref()
+    }
+
+    fn slot_components(&self, key: &ChunkKey) -> Option<(usize, usize, usize, usize)> {
+        if !key.is_valid_for_lod() {
+            return None;
+        }
+        let lod_index = usize::from(key.lod);
+        let face_index = Self::face_index(key.face);
+        let resolution = ChunkKey::resolution_for_lod(key.lod) as usize;
+        let slot_index = key.y as usize * resolution + key.x as usize;
+        Some((lod_index, face_index, slot_index, resolution * resolution))
+    }
+
+    fn face_slot_count(&self, lod: u8) -> usize {
+        let resolution = ChunkKey::resolution_for_lod(lod) as usize;
+        resolution * resolution
+    }
+
+    fn face_index(face: Face) -> usize {
+        match face {
+            Face::Px => 0,
+            Face::Nx => 1,
+            Face::Py => 2,
+            Face::Ny => 3,
+            Face::Pz => 4,
+            Face::Nz => 5,
+        }
     }
 }
 
@@ -748,7 +920,7 @@ impl RuntimeConfig {
             ),
             MaxLodPolicyKind::Fixed => self.max_lod.min(self.max_lod_cap),
         };
-        self.metadata_precompute_max_lod = self.metadata_precompute_max_lod.min(self.max_lod);
+        self.metadata_precompute_max_lod = self.max_lod;
         self.payload_precompute_max_lod = self.payload_precompute_max_lod.min(self.max_lod);
         self
     }
@@ -770,7 +942,7 @@ impl Default for RuntimeConfig {
             max_lod_policy: MaxLodPolicyKind::RadiusDerived,
             max_lod,
             max_lod_cap: topology::DEFAULT_MAX_LOD,
-            metadata_precompute_max_lod: DEFAULT_METADATA_PRECOMPUTE_MAX_LOD.min(max_lod),
+            metadata_precompute_max_lod: max_lod,
             payload_precompute_max_lod: PAYLOAD_PRECOMPUTE_MAX_LOD.min(max_lod),
             worker_thread_count,
             planet_seed: DEFAULT_PLANET_SEED,
