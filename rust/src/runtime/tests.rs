@@ -100,6 +100,17 @@ fn local_position_to_dvec3(position: [f32; 3]) -> DVec3 {
     )
 }
 
+fn visible_edge_vertex_index(edge: Edge, step: u32) -> usize {
+    let last = mesh_topology::VISIBLE_VERTICES_PER_EDGE - 1;
+    let (x, y) = match edge {
+        Edge::NegU => (0, step),
+        Edge::PosU => (last, step),
+        Edge::NegV => (step, 0),
+        Edge::PosV => (step, last),
+    };
+    (y * mesh_topology::VISIBLE_VERTICES_PER_EDGE + x) as usize
+}
+
 #[test]
 fn chunk_key_validates_coords_against_lod_resolution() {
     assert!(ChunkKey::new(Face::Px, 3, 7, 7).is_valid_for_lod());
@@ -309,6 +320,102 @@ fn phase10_payload_vertices_are_chunk_local_offsets() {
         "reconstructed={reconstructed:?} expected={expected:?}"
     );
     assert!(payload.chunk_origin_planet.length() > 0.0);
+}
+
+#[test]
+fn generated_mesh_triangles_use_godot_clockwise_front_faces() {
+    let mut runtime = test_runtime();
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let chunk_origin = runtime.ensure_chunk_meta(key).unwrap().bounds.center_planet;
+    let samples = runtime.sample_chunk_scalar_field(key).unwrap();
+    let mesh = runtime
+        .derive_cpu_mesh_buffers(&samples, mesh_topology::BASE_STITCH_MASK, chunk_origin)
+        .unwrap();
+
+    for triangle in mesh.indices.chunks_exact(3).take(64) {
+        let a = chunk_origin + local_position_to_dvec3(mesh.positions[triangle[0] as usize]);
+        let b = chunk_origin + local_position_to_dvec3(mesh.positions[triangle[1] as usize]);
+        let c = chunk_origin + local_position_to_dvec3(mesh.positions[triangle[2] as usize]);
+        let outward = ((b - a).cross(c - a)).normalize_or_zero();
+        let triangle_center = (a + b + c) / 3.0;
+
+        assert!(
+            outward.dot(triangle_center.normalize_or_zero()) < 0.0,
+            "triangle winding was not clockwise/front-facing for Godot: {triangle:?}"
+        );
+    }
+}
+
+#[test]
+fn generated_mesh_normals_point_outward() {
+    let mut runtime = test_runtime();
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let chunk_origin = runtime.ensure_chunk_meta(key).unwrap().bounds.center_planet;
+    let samples = runtime.sample_chunk_scalar_field(key).unwrap();
+    let mesh = runtime
+        .derive_cpu_mesh_buffers(&samples, mesh_topology::BASE_STITCH_MASK, chunk_origin)
+        .unwrap();
+
+    for (position, normal) in mesh.positions.iter().zip(mesh.normals.iter()).take(64) {
+        let absolute_position = chunk_origin + local_position_to_dvec3(*position);
+        let outward = absolute_position.normalize_or_zero();
+        let normal = local_position_to_dvec3(*normal).normalize_or_zero();
+
+        assert!(
+            normal.dot(outward) > 0.0,
+            "normal was not outward-facing: position={absolute_position:?} normal={normal:?}"
+        );
+    }
+}
+
+#[test]
+fn rendered_chunk_edges_match_across_cross_face_seams() {
+    let mut runtime = test_runtime();
+    let key = ChunkKey::new(Face::Px, 0, 0, 0);
+    let edge = Edge::PosU;
+    let neighbor = topology::same_lod_neighbor(key, edge).unwrap();
+    let xform = topology::edge_transform(key.face, edge);
+    let last = mesh_topology::VISIBLE_VERTICES_PER_EDGE - 1;
+
+    let chunk_origin = runtime.ensure_chunk_meta(key).unwrap().bounds.center_planet;
+    let chunk_samples = runtime.sample_chunk_scalar_field(key).unwrap();
+    let chunk_mesh = runtime
+        .derive_cpu_mesh_buffers(
+            &chunk_samples,
+            mesh_topology::BASE_STITCH_MASK,
+            chunk_origin,
+        )
+        .unwrap();
+
+    let neighbor_origin = runtime
+        .ensure_chunk_meta(neighbor)
+        .unwrap()
+        .bounds
+        .center_planet;
+    let neighbor_samples = runtime.sample_chunk_scalar_field(neighbor).unwrap();
+    let neighbor_mesh = runtime
+        .derive_cpu_mesh_buffers(
+            &neighbor_samples,
+            mesh_topology::BASE_STITCH_MASK,
+            neighbor_origin,
+        )
+        .unwrap();
+
+    for step in 0..=last {
+        let chunk_index = visible_edge_vertex_index(edge, step);
+        let mapped_step = if xform.flip { last - step } else { step };
+        let neighbor_index = visible_edge_vertex_index(xform.neighbor_edge, mapped_step);
+
+        let chunk_position =
+            chunk_origin + local_position_to_dvec3(chunk_mesh.positions[chunk_index]);
+        let neighbor_position =
+            neighbor_origin + local_position_to_dvec3(neighbor_mesh.positions[neighbor_index]);
+
+        assert!(
+            (chunk_position - neighbor_position).length() < 1.0e-3,
+            "seam mismatch at step {step}: {chunk_position:?} vs {neighbor_position:?}"
+        );
+    }
 }
 
 #[test]

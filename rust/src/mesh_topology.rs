@@ -283,7 +283,7 @@ fn add_pos_v_stitch_pair(indices: &mut Vec<i32>, covered: &mut [bool], x: u32) {
 }
 
 fn push_triangle(indices: &mut Vec<i32>, a: i32, b: i32, c: i32) {
-    indices.extend_from_slice(&[a, b, c]);
+    indices.extend_from_slice(&[a, c, b]);
 }
 
 fn vertex_index(x: u32, y: u32) -> i32 {

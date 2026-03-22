@@ -238,7 +238,7 @@ impl PlanetRuntime {
     }
 
     #[cfg(test)]
-    fn derive_cpu_mesh_buffers(
+    pub(crate) fn derive_cpu_mesh_buffers(
         &self,
         samples: &ChunkSampleGrid,
         stitch_mask: u8,

@@ -278,24 +278,13 @@ impl PlanetRuntime {
                     ) else {
                         return;
                     };
+                    let arrays = cpu_mesh_to_surface_arrays(&mesh);
 
-                    rendering_server.mesh_surface_update_vertex_region(
+                    rendering_server.mesh_clear(mesh_rid);
+                    rendering_server.mesh_add_surface_from_arrays(
                         mesh_rid,
-                        0,
-                        0,
-                        &staging.vertex_region,
-                    );
-                    rendering_server.mesh_surface_update_attribute_region(
-                        mesh_rid,
-                        0,
-                        0,
-                        &staging.attribute_region,
-                    );
-                    rendering_server.mesh_surface_update_index_region(
-                        mesh_rid,
-                        0,
-                        0,
-                        &staging.index_region,
+                        PrimitiveType::TRIANGLES,
+                        &arrays,
                     );
                     rendering_server.instance_set_base(render_instance_rid, mesh_rid);
                     rendering_server.instance_set_scenario(render_instance_rid, self.scenario_rid);
@@ -320,24 +309,13 @@ impl PlanetRuntime {
                     ) else {
                         return;
                     };
+                    let arrays = cpu_mesh_to_surface_arrays(&mesh);
 
-                    rendering_server.mesh_surface_update_vertex_region(
+                    rendering_server.mesh_clear(entry.mesh_rid);
+                    rendering_server.mesh_add_surface_from_arrays(
                         entry.mesh_rid,
-                        0,
-                        0,
-                        &staging.vertex_region,
-                    );
-                    rendering_server.mesh_surface_update_attribute_region(
-                        entry.mesh_rid,
-                        0,
-                        0,
-                        &staging.attribute_region,
-                    );
-                    rendering_server.mesh_surface_update_index_region(
-                        entry.mesh_rid,
-                        0,
-                        0,
-                        &staging.index_region,
+                        PrimitiveType::TRIANGLES,
+                        &arrays,
                     );
                     rendering_server.instance_set_base(entry.render_instance_rid, entry.mesh_rid);
                     rendering_server
