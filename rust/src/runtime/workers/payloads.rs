@@ -30,6 +30,9 @@ pub(crate) struct PreparedRenderPayload {
     pub chunk_origin_planet: DVec3,
     pub mesh: CpuMeshBuffers,
     pub assets: Vec<AssetInstance>,
+    pub collider_vertices: Vec<[f32; 3]>,
+    pub collider_indices: Vec<i32>,
+    pub collider_faces: Vec<[f32; 3]>,
     pub packed_regions: PackedMeshRegions,
     pub scratch_metrics: WorkerScratchJobMetrics,
 }
@@ -412,6 +415,9 @@ fn build_render_payload_with_scratch(
         &mut scratch.index_region,
     );
     let placement = build_chunk_asset_placement(&request.config, request.key);
+    let collider_vertices = scratch.mesh.positions.clone();
+    let collider_indices = scratch.mesh.indices.clone();
+    let collider_faces = collider_face_vertices_from_indices(&collider_vertices, &collider_indices);
 
     PreparedRenderPayload {
         sequence: request.sequence,
@@ -424,6 +430,9 @@ fn build_render_payload_with_scratch(
         chunk_origin_planet: request.chunk_origin_planet,
         mesh: scratch.mesh.clone(),
         assets: placement.assets,
+        collider_vertices,
+        collider_indices,
+        collider_faces,
         packed_regions: PackedMeshRegions {
             vertex_region: scratch.vertex_region.clone(),
             attribute_region: scratch.attribute_region.clone(),

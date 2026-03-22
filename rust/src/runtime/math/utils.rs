@@ -105,13 +105,15 @@ pub(crate) fn cpu_mesh_to_surface_arrays(mesh: &CpuMeshBuffers) -> Array<Variant
     ])
 }
 
-pub(crate) fn collider_faces_from_indices(
+pub(crate) fn collider_face_vertices_from_indices(
     collider_vertices: &[[f32; 3]],
     collider_indices: &[i32],
-) -> PackedVector3Array {
-    PackedVector3Array::from_iter(collider_indices.iter().filter_map(|index| {
+) -> Vec<[f32; 3]> {
+    collider_indices
+        .iter()
+        .filter_map(|index| {
         let index = usize::try_from(*index).ok()?;
-        let position = *collider_vertices.get(index)?;
-        Some(Vector3::new(position[0], position[1], position[2]))
-    }))
+        collider_vertices.get(index).copied()
+    })
+        .collect()
 }

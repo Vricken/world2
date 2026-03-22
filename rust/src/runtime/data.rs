@@ -510,6 +510,7 @@ pub enum RenderLifecycleCommand {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChunkPayload {
+    pub payload_epoch: u64,
     pub surface_class: SurfaceClassKey,
     pub stitch_mask: u8,
     pub sample_count: usize,
@@ -521,6 +522,7 @@ pub struct ChunkPayload {
     pub assets: Vec<AssetInstance>,
     pub collider_vertices: Option<Vec<[f32; 3]>>,
     pub collider_indices: Option<Vec<i32>>,
+    pub collider_faces: Option<Vec<[f32; 3]>>,
     pub render_lifecycle: RenderLifecycleCommand,
 }
 
@@ -537,6 +539,7 @@ impl Default for ChunkPayload {
         .expect("default surface class must be valid");
 
         Self {
+            payload_epoch: 0,
             surface_class,
             stitch_mask: mesh_topology::BASE_STITCH_MASK,
             sample_count: 0,
@@ -548,6 +551,7 @@ impl Default for ChunkPayload {
             assets: Vec::new(),
             collider_vertices: None,
             collider_indices: None,
+            collider_faces: None,
             render_lifecycle: RenderLifecycleCommand::ColdCreate(
                 RenderFallbackReason::MissingCurrentSurfaceClass,
             ),

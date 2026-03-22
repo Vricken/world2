@@ -66,6 +66,7 @@ impl PlanetRuntime {
             phase9_worker_threads: self.threaded_payload_generator.worker_count(),
             ..SelectionFrameState::default()
         };
+        self.drain_ready_chunk_meta();
         if self.origin_shift_pending_rebind {
             frame_state.phase10_origin_rebases += 1;
             self.rebind_active_relative_transforms(&mut frame_state);
@@ -81,6 +82,34 @@ impl PlanetRuntime {
         self.frame_state = frame_state;
 
         Ok(())
+    }
+
+    pub(crate) fn drain_ready_chunk_meta(&mut self) {
+        for prepared in self.threaded_metadata_generator.drain_ready() {
+            let Some(expected_epoch) = self.pending_meta_requests.get(&prepared.key).copied() else {
+                continue;
+            };
+            if expected_epoch != prepared.epoch {
+                continue;
+            }
+            self.pending_meta_requests.remove(&prepared.key);
+            self.meta.insert(prepared.key, prepared.meta);
+        }
+    }
+
+    pub(crate) fn request_chunk_meta_if_missing(&mut self, key: ChunkKey) {
+        if self.meta.contains_key(&key) || self.pending_meta_requests.contains_key(&key) {
+            return;
+        }
+
+        let epoch = self.next_meta_request_epoch;
+        self.next_meta_request_epoch = self.next_meta_request_epoch.saturating_add(1);
+        self.pending_meta_requests.insert(key, epoch);
+        self.threaded_metadata_generator.submit(ChunkMetaBuildRequest {
+            epoch,
+            key,
+            config: self.config.clone(),
+        });
     }
 
     pub(crate) fn build_chunk_meta(&self, key: ChunkKey) -> Result<ChunkMeta, TopologyError> {
@@ -448,11 +477,23 @@ impl PlanetRuntime {
             && self.should_split_chunk(key, error_px, split_ancestors);
 
         if should_split {
-            for child in key
+            let children = key
                 .children()
-                .expect("child keys must exist while below configured max lod")
-            {
-                self.select_render_chunk(child, camera, selected, split_ancestors, frame_state)?;
+                .expect("child keys must exist while below configured max lod");
+            let mut all_children_ready = true;
+            for child in children.iter().copied() {
+                if !self.meta.contains_key(&child) {
+                    self.request_chunk_meta_if_missing(child);
+                    all_children_ready = false;
+                }
+            }
+
+            if all_children_ready {
+                for child in children.iter().copied() {
+                    self.select_render_chunk(child, camera, selected, split_ancestors, frame_state)?;
+                }
+            } else {
+                selected.insert(key);
             }
         } else {
             selected.insert(key);
@@ -522,15 +563,24 @@ impl PlanetRuntime {
                     continue;
                 }
 
+                let mut all_children_ready = true;
                 for child in coarse_key
                     .children()
                     .expect("normalization only splits non-leaf chunks")
                 {
-                    self.ensure_chunk_meta(child)?;
-                    selected.insert(child);
+                    if self.meta.contains_key(&child) {
+                        selected.insert(child);
+                    } else {
+                        self.request_chunk_meta_if_missing(child);
+                        all_children_ready = false;
+                    }
                 }
 
-                splits_applied += 1;
+                if !all_children_ready {
+                    selected.insert(coarse_key);
+                } else {
+                    splits_applied += 1;
+                }
             }
         }
 
@@ -640,6 +690,9 @@ impl PlanetRuntime {
             .pack_mesh_regions(&mesh, &request.surface_class)
             .expect("phase 7 packer must match configured surface strides");
         let placement = build_chunk_asset_placement(&self.config, key);
+        let collider_vertices = mesh.positions.clone();
+        let collider_indices = mesh.indices.clone();
+        let collider_faces = collider_face_vertices_from_indices(&collider_vertices, &collider_indices);
         let prepared = PreparedRenderPayload {
             sequence: request.sequence,
             epoch: request.epoch,
@@ -651,6 +704,9 @@ impl PlanetRuntime {
             chunk_origin_planet: request.chunk_origin_planet,
             mesh,
             assets: placement.assets,
+            collider_vertices,
+            collider_indices,
+            collider_faces,
             packed_regions,
             scratch_metrics: super::super::workers::payloads::WorkerScratchJobMetrics::default(),
         };
@@ -836,6 +892,7 @@ impl PlanetRuntime {
         frame_state: &mut SelectionFrameState,
     ) -> usize {
         let PreparedRenderPayload {
+            epoch,
             key,
             surface_class,
             sample_count,
@@ -844,6 +901,9 @@ impl PlanetRuntime {
             chunk_origin_planet,
             mesh,
             assets,
+            collider_vertices,
+            collider_indices,
+            collider_faces,
             packed_regions,
             ..
         } = prepared;
@@ -911,6 +971,7 @@ impl PlanetRuntime {
         }
 
         let payload = ChunkPayload {
+            payload_epoch: epoch,
             surface_class: surface_class.clone(),
             stitch_mask: surface_class.stitch_mask,
             sample_count,
@@ -923,12 +984,16 @@ impl PlanetRuntime {
                 _ => None,
             },
             assets,
-            collider_vertices: None,
-            collider_indices: None,
+            collider_vertices: Some(collider_vertices),
+            collider_indices: Some(collider_indices),
+            collider_faces: Some(collider_faces),
             render_lifecycle,
         };
         if let Some(previous_payload) = self.resident_payloads.insert(key, payload) {
             self.reclaim_payload_resources(previous_payload);
+        }
+        if self.active_render.contains(&key) {
+            self.asset_groups_dirty = true;
         }
 
         upload_bytes
@@ -952,7 +1017,18 @@ impl PlanetRuntime {
 
         if payload.collider_vertices.is_none() {
             payload.collider_vertices = Some(payload.mesh.positions.clone());
+        }
+        if payload.collider_indices.is_none() {
             payload.collider_indices = Some(payload.mesh.indices.clone());
+        }
+        if payload.collider_faces.is_none() {
+            let Some(vertices) = payload.collider_vertices.as_deref() else {
+                return;
+            };
+            let Some(indices) = payload.collider_indices.as_deref() else {
+                return;
+            };
+            payload.collider_faces = Some(collider_face_vertices_from_indices(vertices, indices));
         }
     }
 }

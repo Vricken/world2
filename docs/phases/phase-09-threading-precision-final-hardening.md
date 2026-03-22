@@ -2,7 +2,7 @@
 
 ## Goal
 
-Ship the documented Mode A worker/commit split: pure Rust worker generation, async request submission, epoch-safe handoff back to the commit lane, synchronized warm-path ownership, and measurable scratch/queue behavior.
+Ship the documented Mode A worker/commit split: pure Rust worker generation, async request submission, epoch-safe handoff back to the commit lane, synchronized warm-path ownership, and measurable scratch/queue behavior across render payloads, chunk metadata, collision prep, and asset-group precompute.
 
 ## Continuity From Phases 01-08
 
@@ -45,15 +45,16 @@ pub enum PlanetCommand {
 
 ## Implemented Threading Contract
 
-- workers: persistent Rust threads that only sample, mesh, and byte-pack render payloads
-- commit side: single-lane warm/cold commit logic, RID ownership, pooled-entry routing, and Godot server calls
-- handoff: mutex/condvar worker queue plus epoch-tagged requests/results, queue-side supersession of stale overlapping jobs, and commit-lane stale-result rejection before install
+- workers: persistent Rust threads that sample, build metadata, mesh, byte-pack render payloads, precompute collision faces, and build desired asset-group snapshots
+- commit side: single-lane warm/cold commit logic, RID ownership, pooled-entry routing, final `RenderingServer`/`PhysicsServer3D` calls, and asset-group diff application
+- handoff: mutex/condvar worker queues plus epoch-tagged requests/results, queue-side supersession of stale overlapping render jobs, and commit-lane stale-result rejection before install
 
 Godot thread-safety docs allow server access from threads, but the shipping implementation intentionally keeps all server and staging mutation on the commit lane. That keeps Phase 09 independent of project thread-setting changes and avoids scene-tree or GPU-adjacent work in workers.
 
 ## Mode A
 
 - workers generate plain Rust mesh buffers plus packed byte regions
+- workers also generate pure-Rust chunk metadata, collider face lists, and desired asset-group snapshots with local bounds
 - one commit lane performs all Godot server calls in controlled batches
 - commit lane owns Godot staging buffers and fills them via `as_mut_slice()`
 - no worker touches scene tree, server singletons, or the active scene tree
@@ -84,6 +85,26 @@ The current codebase implements option `1`.
 
 This keeps the worker side aggressive without allowing old intermediate LOD work to overwrite newer visibility decisions.
 
+## Async Metadata Rules
+
+- startup still prebuilds metadata only through the configured `metadata_precompute_max_lod`
+- if selection needs child metadata above that window, it submits async metadata requests instead of building on the frame lane
+- selection keeps the current coarse parent active until the requested child metadata arrives and can be reconsidered on a later frame
+- ready metadata results are installed only if their epoch still matches the runtime's pending request table
+
+## Async Collision Prep Rules
+
+- render-payload workers now derive collider vertices, collider indices, and flattened concave face vertices from the sampled mesh
+- commit-lane physics activation only converts the precomputed face list into Godot packed arrays and refreshes the shape/body RIDs
+- the legacy on-lane collision derivation path remains only as a defensive fallback when older test helpers construct partial payloads
+
+## Async Asset-Group Rules
+
+- desired asset groups are now built from a snapshot of active render chunks on a dedicated worker queue
+- each asset-group snapshot carries an epoch, and only the newest prepared snapshot is accepted for diff/commit
+- expensive grouping and local-AABB derivation move off the commit lane, but `RenderingServer` multimesh creation and mutation remain single-lane
+- if no prepared asset-group result is ready yet, the runtime keeps the previous committed asset groups for that frame
+
 ## Worker Allocation Policy
 
 - avoid fresh large `Vec` allocation per job when possible
@@ -96,13 +117,13 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 
 ## Implementation Notes
 
-- `PlanetRuntime` now owns a persistent `ThreadedPayloadGenerator` sized from `RuntimeConfig::worker_thread_count`.
+- `PlanetRuntime` now owns persistent `ThreadedPayloadGenerator`, `ThreadedMetadataGenerator`, and `ThreadedAssetGroupGenerator` workers.
 - Payload requests are collected in deterministic key order before entering the worker queue.
 - The runtime now submits render payload requests asynchronously, drains only ready results each frame, and leaves in-flight work resident in the worker queue between frames.
 - Worker results are sorted by `(epoch, sequence)` before any runtime state or Godot staging is touched.
-- `pending_payload_requests` in `PlanetRuntime` is now the authority for whether a completed worker result is still valid.
+- `pending_payload_requests`, `pending_meta_requests`, and `pending_asset_group_epoch` in `PlanetRuntime` are now the authorities for whether a completed worker result is still valid.
 - Warm-path routing (`ReuseCurrentSurface`, `ReusePooledSurface`, `ColdCreate`) remains commit-lane only.
-- Physics activation remains commit-lane only and still derives collider payloads from the committed render payload.
+- Physics activation remains commit-lane only, but collider face preprocessing now happens off-thread before the payload is installed.
 - Mode B is not implemented. There is no worker-side server mutation path in shipping code.
 
 ## Checklist
@@ -115,6 +136,9 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 - [x] Capture queue, contention, and allocation metrics.
 - [x] Reject stale worker output with epoch checks before runtime install.
 - [x] Allow newer overlapping LOD requests to supersede older queued requests.
+- [x] Move post-window metadata generation off the selection lane.
+- [x] Precompute collision face payloads off the commit lane.
+- [x] Move desired asset-group grouping and local-bounds derivation off the commit lane.
 
 ## Prerequisites
 
@@ -135,6 +159,8 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 - [x] Scratch reuse and growth metrics are emitted for tuning.
 - [x] No mutable staging sharing occurs across concurrent worker jobs.
 - [x] Async request/result path drops stale results instead of regressing to older LOD decisions.
+- [x] Metadata misses above the prebuild window no longer force synchronous selection work.
+- [x] Asset-group async preparation preserves valid residency under async streaming tests.
 
 ## Definition of Done
 
@@ -142,6 +168,7 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 - [x] Mode A is stable under the current headless validation path.
 - [x] Threading metrics support tuning decisions.
 - [x] Async payload submission no longer forces the frame to wait for every requested chunk mesh.
+- [x] Metadata, collision prep, and asset-group preprocessing no longer require synchronous work on the hot frame lane.
 
 ## Deviations From Earlier Plan Text
 
@@ -153,9 +180,9 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed `60/60`; the worker path now supports async request submission, queue-side supersession of older overlapping jobs, and epoch-based stale-result dropping before install. Headless runtime logs now expose `worker_submitted`, `worker_ready`, `worker_stale`, `worker_superseded`, and `worker_inflight` alongside the existing queue and scratch metrics.
+- [x] Result summary: `cargo test` passed `60/60`; the worker path now supports async render payload submission, async metadata generation above the startup window, off-thread collision face preprocessing, async asset-group snapshot preparation, queue-side supersession of older overlapping jobs, and epoch-based stale-result dropping before install. Headless runtime logs now expose `worker_submitted`, `worker_ready`, `worker_stale`, `worker_superseded`, and `worker_inflight` alongside the existing queue and scratch metrics.
 - [x] Mode tested: Mode A only
-- [x] Follow-up actions: if profiling still shows worker generation dominating after the new async queue and lower default LOD depth, consider priority-aware batching by camera distance or a larger ownership refactor before exploring a GPU-assisted generation path.
+- [x] Follow-up actions: if profiling still shows worker generation dominating after the new async queue and lower default LOD depth, consider deeper batching/coalescing or a larger ownership refactor before exploring a GPU-assisted generation path.
 
 ## References
 

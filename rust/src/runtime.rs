@@ -34,6 +34,10 @@ use crate::topology::{self, TopologyError};
 
 use math::*;
 use workers::{PreparedRenderPayload, RenderPayloadRequest, ThreadedPayloadGenerator};
+use workers::{
+    ChunkMetaBuildRequest, DesiredAssetGroupsBuildRequest, ThreadedAssetGroupGenerator,
+    ThreadedMetadataGenerator,
+};
 
 pub use assets::*;
 pub use data::*;
@@ -282,8 +286,15 @@ pub struct PlanetRuntime {
     pub asset_groups: HashMap<AssetGroupKey, AssetGroupState>,
     pub asset_family_meshes: HashMap<u16, Rid>,
     threaded_payload_generator: ThreadedPayloadGenerator,
+    threaded_metadata_generator: ThreadedMetadataGenerator,
+    threaded_asset_group_generator: ThreadedAssetGroupGenerator,
+    pending_meta_requests: HashMap<ChunkKey, u64>,
     pending_payload_requests: HashMap<ChunkKey, PendingPayloadRequest>,
+    pending_asset_group_epoch: Option<u64>,
+    asset_groups_dirty: bool,
+    next_meta_request_epoch: u64,
     next_payload_request_epoch: u64,
+    next_asset_group_epoch: u64,
     pub origin_snapshot: OriginSnapshot,
     pub frame_state: SelectionFrameState,
     pub deferred_starvation: HashMap<DeferredOpKey, u32>,

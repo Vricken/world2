@@ -86,6 +86,13 @@ pub struct DesiredAssetGroup {
     pub group_origin_planet: DVec3,
     pub source_chunks: Vec<ChunkKey>,
     pub assets: Vec<AssetInstance>,
+    pub local_bounds: Option<AssetGroupLocalBounds>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AssetGroupLocalBounds {
+    pub min: [f32; 3],
+    pub size: [f32; 3],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -218,6 +225,7 @@ pub fn build_desired_asset_groups(
                     group_origin_planet,
                     source_chunks: Vec::new(),
                     assets: Vec::new(),
+                    local_bounds: None,
                 }
             });
             if entry.source_chunks.last().copied() != Some(key) {
@@ -229,6 +237,7 @@ pub fn build_desired_asset_groups(
 
     for group in groups.values_mut() {
         group.source_chunks.sort_unstable();
+        group.local_bounds = asset_group_local_bounds(group.group_origin_planet, &group.assets);
     }
 
     groups
@@ -299,6 +308,17 @@ pub fn asset_group_local_aabb(
     group_origin_planet: DVec3,
     assets: &[AssetInstance],
 ) -> Option<Aabb> {
+    let bounds = asset_group_local_bounds(group_origin_planet, assets)?;
+    Some(Aabb::new(
+        Vector3::new(bounds.min[0], bounds.min[1], bounds.min[2]),
+        Vector3::new(bounds.size[0], bounds.size[1], bounds.size[2]),
+    ))
+}
+
+pub fn asset_group_local_bounds(
+    group_origin_planet: DVec3,
+    assets: &[AssetInstance],
+) -> Option<AssetGroupLocalBounds> {
     let mut min = Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut max = Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
 
@@ -323,7 +343,10 @@ pub fn asset_group_local_aabb(
         );
     }
 
-    (min.x.is_finite() && min.y.is_finite() && min.z.is_finite()).then(|| Aabb::new(min, max - min))
+    (min.x.is_finite() && min.y.is_finite() && min.z.is_finite()).then(|| AssetGroupLocalBounds {
+        min: [min.x, min.y, min.z],
+        size: [max.x - min.x, max.y - min.y, max.z - min.z],
+    })
 }
 
 fn terrain_settings(config: &RuntimeConfig) -> TerrainFieldSettings {

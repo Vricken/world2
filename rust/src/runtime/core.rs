@@ -11,6 +11,8 @@ impl PlanetRuntime {
         let config = config.normalized();
         let mut runtime = Self {
             threaded_payload_generator: ThreadedPayloadGenerator::new(config.worker_thread_count),
+            threaded_metadata_generator: ThreadedMetadataGenerator::new(config.worker_thread_count),
+            threaded_asset_group_generator: ThreadedAssetGroupGenerator::new(1),
             origin_snapshot: OriginSnapshot::for_config(&config, DVec3::ZERO),
             config,
             scenario_rid,
@@ -25,8 +27,13 @@ impl PlanetRuntime {
             asset_groups: HashMap::new(),
             asset_family_meshes: HashMap::new(),
             frame_state: SelectionFrameState::default(),
+            pending_meta_requests: HashMap::new(),
             pending_payload_requests: HashMap::new(),
+            pending_asset_group_epoch: None,
+            asset_groups_dirty: true,
+            next_meta_request_epoch: 1,
             next_payload_request_epoch: 1,
+            next_asset_group_epoch: 1,
             deferred_starvation: HashMap::new(),
             origin_shift_pending_rebind: false,
         };

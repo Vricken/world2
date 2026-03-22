@@ -304,10 +304,12 @@ impl PlanetRuntime {
                 if self.commit_render_payload(op.key, frame_state) {
                     self.active_render.insert(op.key);
                     self.ensure_rid_state(op.key).render_resident = true;
+                    self.asset_groups_dirty = true;
                     true
                 } else {
                     self.active_render.remove(&op.key);
                     self.ensure_rid_state(op.key).render_resident = false;
+                    self.asset_groups_dirty = true;
                     false
                 }
             }
@@ -315,6 +317,7 @@ impl PlanetRuntime {
                 if self.commit_render_payload(op.key, frame_state) {
                     self.active_render.insert(op.key);
                     self.ensure_rid_state(op.key).render_resident = true;
+                    self.asset_groups_dirty = true;
                     true
                 } else {
                     let still_has_render_entry = self
@@ -325,10 +328,12 @@ impl PlanetRuntime {
                     if still_has_render_entry {
                         self.active_render.insert(op.key);
                         self.ensure_rid_state(op.key).render_resident = true;
+                        self.asset_groups_dirty = true;
                         true
                     } else {
                         self.active_render.remove(&op.key);
                         self.ensure_rid_state(op.key).render_resident = false;
+                        self.asset_groups_dirty = true;
                         false
                     }
                 }
@@ -337,6 +342,7 @@ impl PlanetRuntime {
                 self.deactivate_render_commit(op.key);
                 self.active_render.remove(&op.key);
                 self.ensure_rid_state(op.key).render_resident = false;
+                self.asset_groups_dirty = true;
                 true
             }
             CommitOpKind::ActivatePhysics => {
@@ -633,13 +639,15 @@ impl PlanetRuntime {
                 let Some(payload) = self.resident_payloads.get(&key) else {
                     return false;
                 };
-                let Some(collider_vertices) = payload.collider_vertices.as_deref() else {
+                let Some(collider_faces) = payload.collider_faces.as_deref() else {
                     return false;
                 };
-                let Some(collider_indices) = payload.collider_indices.as_deref() else {
-                    return false;
-                };
-                collider_faces_from_indices(collider_vertices, collider_indices)
+                PackedVector3Array::from_iter(
+                    collider_faces
+                        .iter()
+                        .copied()
+                        .map(|position| Vector3::new(position[0], position[1], position[2])),
+                )
             };
             let mut shape_data = Dictionary::<StringName, Variant>::new();
             shape_data.set("faces", &collider_faces.to_variant());
@@ -822,12 +830,26 @@ impl PlanetRuntime {
         &mut self,
         frame_state: &mut SelectionFrameState,
     ) -> Result<(), TopologyError> {
-        let desired = build_desired_asset_groups(
-            &self.config,
-            &self.active_render,
-            &self.resident_payloads,
-            &self.meta,
-        );
+        if self.asset_groups_dirty {
+            self.submit_desired_asset_groups_request();
+            self.asset_groups_dirty = false;
+        }
+
+        let mut ready_groups = None;
+        for prepared in self.threaded_asset_group_generator.drain_ready() {
+            if self.pending_asset_group_epoch == Some(prepared.epoch) {
+                ready_groups = Some(prepared.groups);
+                self.pending_asset_group_epoch = None;
+            }
+        }
+
+        let Some(desired) = ready_groups else {
+            frame_state.phase12_active_groups = self.asset_groups.len();
+            frame_state.phase12_active_instances =
+                self.asset_groups.values().map(|group| group.instance_count).sum();
+            return Ok(());
+        };
+
         let desired_keys = desired.keys().copied().collect::<HashSet<_>>();
         let current_keys = self.asset_groups.keys().copied().collect::<Vec<_>>();
 
@@ -847,6 +869,51 @@ impl PlanetRuntime {
         Ok(())
     }
 
+    fn submit_desired_asset_groups_request(&mut self) {
+        let epoch = self.next_asset_group_epoch;
+        self.next_asset_group_epoch = self.next_asset_group_epoch.saturating_add(1);
+        self.pending_asset_group_epoch = Some(epoch);
+
+        let mut chunks = Vec::with_capacity(self.active_render.len());
+        let mut anchor_origins = HashMap::new();
+        for key in self.active_render.iter().copied() {
+            let Some(payload) = self.resident_payloads.get(&key) else {
+                continue;
+            };
+            if payload.assets.is_empty() {
+                continue;
+            }
+
+            chunks.push(super::super::workers::asset_groups::AssetGroupChunkInput {
+                key,
+                chunk_origin_planet: self
+                    .meta
+                    .get(&key)
+                    .map(|meta| meta.bounds.center_planet)
+                    .unwrap_or(payload.chunk_origin_planet),
+                assets: payload.assets.clone(),
+            });
+
+            for family in payload.assets.iter().map(|asset| asset.family_id) {
+                let group_key =
+                    asset_group_key_for_chunk(key, family, self.config.asset_group_chunk_span);
+                let anchor_key = asset_group_anchor_key(group_key, self.config.asset_group_chunk_span);
+                if let Some(origin) = self.meta.get(&anchor_key).map(|meta| meta.bounds.center_planet)
+                {
+                    anchor_origins.insert(anchor_key, origin);
+                }
+            }
+        }
+
+        self.threaded_asset_group_generator
+            .submit_latest(DesiredAssetGroupsBuildRequest {
+                epoch,
+                config: self.config.clone(),
+                chunks,
+                anchor_origins,
+            });
+    }
+
     fn commit_asset_group(
         &mut self,
         group: DesiredAssetGroup,
@@ -857,6 +924,7 @@ impl PlanetRuntime {
             group_origin_planet,
             source_chunks,
             assets,
+            local_bounds,
         } = group;
 
         if assets.is_empty() {
@@ -883,8 +951,14 @@ impl PlanetRuntime {
                 MultimeshTransformFormat::TRANSFORM_3D,
             );
             rendering_server.multimesh_set_mesh(multimesh_rid, mesh_rid);
-            if let Some(aabb) = asset_group_local_aabb(group_origin_planet, &assets) {
-                rendering_server.multimesh_set_custom_aabb(multimesh_rid, aabb);
+            if let Some(bounds) = local_bounds {
+                rendering_server.multimesh_set_custom_aabb(
+                    multimesh_rid,
+                    Aabb::new(
+                        Vector3::new(bounds.min[0], bounds.min[1], bounds.min[2]),
+                        Vector3::new(bounds.size[0], bounds.size[1], bounds.size[2]),
+                    ),
+                );
             }
             for (index, asset) in assets.iter().enumerate() {
                 rendering_server.multimesh_instance_set_transform(
