@@ -350,9 +350,11 @@ impl PlanetRuntime {
 
     pub fn strategy_summary(&self) -> String {
         format!(
-            "projection={} visibility={} render_backend={} staging={}",
+            "projection={} visibility={} frustum_culling={} coarse_lod_fallback={} render_backend={} staging={}",
             ProjectionStrategy::label(&self.config.cube_projection),
             ChunkVisibilityStrategy::label(&self.config.visibility_strategy),
+            self.config.enable_frustum_culling,
+            self.config.keep_coarse_lod_chunks_rendered,
             ChunkRenderBackend::label(&self.config.render_backend),
             PackedStagingPolicy::label(&self.config.staging_policy),
         )

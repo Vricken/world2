@@ -134,7 +134,7 @@ impl ChunkMetrics {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChunkNeighbors {
     pub same_lod: [ChunkKey; 4],
 }
@@ -313,6 +313,7 @@ impl ChunkMeta {
 pub(crate) struct StoredChunkMeta {
     pub bounds: ChunkBounds,
     pub metrics: ChunkMetrics,
+    pub neighbors: ChunkNeighbors,
 }
 
 impl StoredChunkMeta {
@@ -320,6 +321,7 @@ impl StoredChunkMeta {
         Self {
             bounds: meta.bounds,
             metrics: meta.metrics,
+            neighbors: meta.neighbors,
         }
     }
 
@@ -332,7 +334,7 @@ impl StoredChunkMeta {
             key,
             bounds: self.bounds,
             metrics: self.metrics,
-            neighbors: topology::same_lod_neighbors(key)?,
+            neighbors: self.neighbors,
             surface_class,
         })
     }
@@ -371,6 +373,10 @@ impl MetadataStore {
     pub fn center_planet(&self, key: &ChunkKey) -> Option<DVec3> {
         self.get_stored(key)
             .map(|stored| stored.bounds.center_planet)
+    }
+
+    pub fn neighbors(&self, key: &ChunkKey) -> Option<ChunkNeighbors> {
+        self.get_stored(key).map(|stored| stored.neighbors)
     }
 
     pub fn get_chunk_meta(
@@ -881,6 +887,8 @@ pub struct RuntimeConfig {
     pub planet_seed: u64,
     pub cube_projection: CubeProjection,
     pub visibility_strategy: VisibilityStrategyKind,
+    pub enable_frustum_culling: bool,
+    pub keep_coarse_lod_chunks_rendered: bool,
     pub render_backend: RenderBackendKind,
     pub staging_policy: PackedStagingPolicyKind,
     pub enable_godot_staging: bool,
@@ -950,6 +958,8 @@ impl Default for RuntimeConfig {
             planet_seed: DEFAULT_PLANET_SEED,
             cube_projection: CubeProjection::Spherified,
             visibility_strategy: VisibilityStrategyKind::HorizonFrustumLod,
+            enable_frustum_culling: true,
+            keep_coarse_lod_chunks_rendered: false,
             render_backend: RenderBackendKind::ServerPool,
             staging_policy: PackedStagingPolicyKind::GodotOwnedReuse,
             enable_godot_staging: true,

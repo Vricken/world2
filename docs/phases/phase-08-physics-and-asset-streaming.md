@@ -18,7 +18,7 @@ What shipped:
 - Real warm render commits that reuse mesh/instance RIDs but refresh the surface with `mesh_clear()` + `mesh_add_surface_from_arrays()` on update.
 - Strict warm-path compatibility routing that keeps current-surface reuse, pooled-surface reuse, and cold fallback separate all the way into commit time.
 - Per-class render pool watermarks and bounded physics pool reuse with deterministic fallback to free instead of unbounded RID growth.
-- Conservative `PhysicsServer3D` collision activation for a capped near-camera chunk set using static bodies plus concave polygon shapes refreshed from prepared collider payloads.
+- Conservative `PhysicsServer3D` collision activation for a capped near-camera chunk set using static bodies plus concave polygon shapes built on demand from resident mesh payloads only when a chunk actually enters physics residency.
 - Explicit server-resource teardown on runtime shutdown so headless validation exits without leaked mesh, instance, body, or shape RIDs.
 - Phase 08 runtime counters in `PlanetRoot` logs for cold vs warm render commits, physics commits, fallback causes, and pool occupancy.
 
@@ -68,7 +68,7 @@ Phase 08 now executes the Phase 07 lifecycle commands instead of only recording 
 
 - Activate collision only for the Phase 06 near-camera physics set, which is now radius-limited and hard-capped before commit.
 - Reuse or create a static `PhysicsServer3D` body/shape pair.
-- Refresh concave triangle data from the prepared collider payload, clear/re-add the body shape, set the body transform, and bind the body into the active physics space.
+- Materialize collider vertices/indices/faces lazily from the resident mesh payload if they have not been requested before, then refresh the concave triangle data, clear/re-add the body shape, set the body transform, and bind the body into the active physics space.
 - Deactivated physics entries are detached from the space and either pooled or freed according to the physics watermark.
 
 ## Pool Policy
@@ -91,6 +91,7 @@ Behavior:
 - Stable docs were used first, but the local validation binary is `Godot 4.7.dev.custom_build.4ea6ff24e`. During live validation, concave server-shape data had to match the engine's `faces` dictionary contract exactly. That runtime behavior is now recorded here because the shipped headless binary enforced it.
 - The original Phase 08 plan targeted raw `mesh_surface_update_*_region()` writes on warm refresh. The maintenance pass reverted that specific optimization after live movement exposed buffer-size mismatches against the engine-managed surface layout. Warm refresh still reuses RIDs and surface-class compatibility checks; only the byte-region mutation step was deferred.
 - The 2026-03-22 close-surface performance pass did not reintroduce partial mesh updates. Instead it reduced warm-path amplification by tightening Phase 06 selection/budgets and by removing avoidable mesh/collider cloning inside the Phase 08 commit code.
+- A later 2026-03-22 profiling pass kept the same collision behavior but stopped prebuilding collider copies/faces for every render payload. The shipped path now pays that cost only when a chunk reaches the bounded physics activation set.
 - Warm current-surface reuse is covered by unit tests and the live commit path, but the default headless scene is still mostly a cold-start validation because the fly controller does not move in headless runs by itself. A scripted moving-camera warm-stress pass remains a useful follow-up.
 
 ## Checklist

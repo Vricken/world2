@@ -33,6 +33,10 @@ pub struct PlanetRoot {
     runtime_tick_count: u64,
     #[export]
     planet_radius: f64,
+    #[export]
+    frustum_culling_enabled: bool,
+    #[export]
+    keep_coarse_lod_chunks_rendered: bool,
     editor_preview_radius_applied: f64,
     editor_preview: Option<Gd<MeshInstance3D>>,
 }
@@ -46,6 +50,8 @@ impl INode3D for PlanetRoot {
             cached_scenario_rid: None,
             cached_physics_space_rid: None,
             planet_radius: runtime.config.planet_radius,
+            frustum_culling_enabled: runtime.config.enable_frustum_culling,
+            keep_coarse_lod_chunks_rendered: runtime.config.keep_coarse_lod_chunks_rendered,
             runtime,
             runtime_tick_count: 0,
             editor_preview_radius_applied: -1.0,
@@ -255,6 +261,8 @@ impl PlanetRoot {
         config.planet_radius = self.planet_radius.max(1.0);
         config.max_lod_cap = Self::project_max_lod_cap();
         config.metadata_precompute_max_lod = MAX_SUPPORTED_MAX_LOD;
+        config.enable_frustum_culling = self.frustum_culling_enabled;
+        config.keep_coarse_lod_chunks_rendered = self.keep_coarse_lod_chunks_rendered;
         config
     }
 

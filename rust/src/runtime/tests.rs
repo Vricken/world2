@@ -361,6 +361,8 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     assert_eq!(config.max_lod, 5);
     assert_eq!(config.payload_precompute_max_lod, 5);
     assert_eq!(config.metadata_precompute_max_lod, 5);
+    assert!(config.enable_frustum_culling);
+    assert!(!config.keep_coarse_lod_chunks_rendered);
     assert_eq!(config.split_threshold_px, DEFAULT_SPLIT_THRESHOLD_PX);
     assert_eq!(config.merge_threshold_px, DEFAULT_MERGE_THRESHOLD_PX);
     assert_eq!(config.horizon_safety_margin, DEFAULT_HORIZON_SAFETY_MARGIN);
@@ -532,7 +534,7 @@ fn phase15_visibility_strategy_matches_runtime_wrappers() {
     );
     assert_eq!(
         runtime.frustum_visible(&camera, &meta),
-        strategy.frustum_visible(&camera, &meta)
+        strategy.frustum_visible(&runtime.config, &camera, &meta)
     );
     assert_eq!(
         runtime.projected_error_px(&camera, &meta),
@@ -1209,6 +1211,41 @@ fn phase10_frustum_checks_use_render_relative_centers() {
 }
 
 #[test]
+fn frustum_culling_can_be_disabled_in_runtime_config() {
+    let runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            enable_frustum_culling: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let meta = ChunkMeta::new(
+        sample_key(),
+        ChunkBounds::new(
+            DVec3::new(10_000.0, 0.0, 0.0),
+            10.0,
+            -10.0,
+            10.0,
+            990.0,
+            1_010.0,
+        ),
+        ChunkMetrics::new(1.0, 0.0, 0.05),
+        sample_surface_class(),
+    )
+    .unwrap();
+    let camera = CameraState {
+        position_planet: DVec3::new(0.0, 0.0, 2_000.0),
+        forward_planet: DVec3::new(0.0, 0.0, -1.0),
+        frustum_planes: box_test_frustum(Vector3::ZERO, 100.0),
+        projection_scale: 1_200.0,
+        origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
+    };
+
+    assert!(runtime.frustum_visible(&camera, &meta));
+}
+
+#[test]
 fn threaded_payload_generation_reuses_worker_scratch_on_follow_up_batch() {
     let mut runtime = PlanetRuntime::new(
         RuntimeConfig {
@@ -1523,6 +1560,49 @@ fn selector_normalizes_neighbor_lod_delta_to_one() {
             }
         }
     }
+}
+
+#[test]
+fn coarse_lod_fallback_keeps_root_chunk_when_face_is_fully_culled() {
+    let base_config = RuntimeConfig {
+        max_lod_policy: MaxLodPolicyKind::Fixed,
+        max_lod: 1,
+        metadata_precompute_max_lod: 1,
+        payload_precompute_max_lod: 1,
+        split_threshold_px: 0.0,
+        merge_threshold_px: 0.0,
+        enable_godot_staging: false,
+        ..RuntimeConfig::default()
+    };
+    let mut runtime = PlanetRuntime::new(base_config.clone(), Rid::Invalid, Rid::Invalid);
+    let root = ChunkKey::new(Face::Pz, 0, 0, 0);
+    let camera = CameraState {
+        position_planet: DVec3::new(0.0, 0.0, 30_000.0),
+        forward_planet: DVec3::new(0.0, 0.0, -1.0),
+        frustum_planes: box_test_frustum(Vector3::new(50_000.0, 50_000.0, 50_000.0), 100.0),
+        projection_scale: 1_200.0,
+        origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
+    };
+    let mut frame_state = SelectionFrameState::default();
+    let selected_without_fallback = runtime
+        .select_render_set(&camera, &mut frame_state)
+        .unwrap();
+
+    let mut fallback_runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            keep_coarse_lod_chunks_rendered: true,
+            ..base_config
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let mut fallback_frame_state = SelectionFrameState::default();
+    let selected_with_fallback = fallback_runtime
+        .select_render_set(&camera, &mut fallback_frame_state)
+        .unwrap();
+
+    assert!(!selected_without_fallback.contains(&root));
+    assert!(selected_with_fallback.contains(&root));
 }
 
 #[test]

@@ -18,12 +18,13 @@ Implemented on 2026-03-22 in:
 What shipped:
 
 - Explicit Phase 13 default constants now anchor the runtime config for radius-derived LOD, payload precompute scope, split/merge hysteresis, horizon slack, physics activation radius, commit/upload budgets, and per-kind render/physics commit caps.
-- Runtime `max_lod` now respects a Project Settings-backed cap at `world2/runtime/max_lod_cap`, which defaults to `10` in-editor while the topology layer itself supports up to `16` for larger planets.
-- Metadata residency now defaults to prebuilding through the effective runtime `max_lod`, and the resident metadata set is stored in dense compact slabs rather than a `HashMap<ChunkKey, ChunkMeta>`.
-- Budgeted diff application already defers render and physics work when total commit count, upload bytes, or per-kind caps are exceeded, and starvation counters remain visible in `SelectionFrameState` and `PlanetRoot` logs.
+- Runtime `max_lod` now respects a Project Settings-backed cap at `world2/runtime/max_lod_cap`, which defaults to `10` in-editor, is now seeded directly in `project.godot` for visibility, and still leaves topology support through LOD `16` for larger planets.
+- Metadata residency now defaults to prebuilding through the effective runtime `max_lod`, and the resident metadata set is stored in dense compact slabs with cached same-LOD neighbors rather than a `HashMap<ChunkKey, ChunkMeta>`.
+- Budgeted diff application already defers render and physics work when total commit count, upload bytes, or per-kind caps are exceeded, now precomputes deactivation coverage blockers instead of rescanning the desired sets per op, and keeps starvation counters visible in `SelectionFrameState` and `PlanetRoot` logs.
 - Render and physics pool reuse remain bounded, with the default physics pool watermark tightened to `4` so collision pooling stays more conservative than the render per-class watermark of `8`.
 - Worker-thread startup remains clamped to a small bounded count, and Phase 13 regression coverage now checks that the documented starting values and worker-count alignment stay explicit in code.
-- `PlanetRoot` now exposes `planet_radius` in the inspector and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
+- `PlanetRoot` now exposes `planet_radius`, `frustum_culling_enabled`, and `keep_coarse_lod_chunks_rendered` in the inspector and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
+- The default `MainCamera` far clip now ships at `20000.0`, which is `5x` the Godot `Camera3D.far` default of `4000.0`.
 
 ## Documentation Checked Before Implementation
 
@@ -34,6 +35,7 @@ Checked on 2026-03-22:
 - Godot stable `Thread-safe APIs` docs for the server-threading constraints that still shape worker/commit ownership.
 - Godot stable `ProjectSettings` docs for custom project-setting registration and editor exposure.
 - Godot stable `SphereMesh` docs for the editor preview primitive.
+- Godot stable `Camera3D` docs for `far` as the camera's far culling boundary and `get_frustum()` as the source of the six runtime frustum planes.
 - godot-rust built-in types docs for `PackedByteArray` copy-on-write semantics and reusable packed staging assumptions carried forward by the budgeted runtime path.
 - godot-rust `GodotClass` docs for `#[class(tool)]` editor execution and exported inspector properties.
 
@@ -42,6 +44,8 @@ Constraints carried into code:
 - Phase 13 changes runtime limits and pool defaults, not the documented server ownership model from Phases 08-12.
 - Pool reuse must stay bounded and measurable; defaults should enforce conservative free behavior rather than allow quiet RID growth.
 - Worker scratch ownership remains one reusable scratch set per worker thread rather than a shared mutable pool.
+- Disabling frustum culling only bypasses the runtime frustum-plane rejection; horizon culling, projected-error LOD selection, and budgeted commit behavior remain unchanged.
+- Coarse fallback coverage must stay selector-driven and server-managed; the runtime still does not create per-chunk scene-tree nodes.
 
 ## Continuity From Phases 01-12
 
@@ -75,6 +79,8 @@ PHYSICS_MAX_ACTIVE_CHUNKS       = 12
 ASSET_CELL_GRID                 = 8x8 per chunk
 COMMIT_BUDGET_PER_FRAME         = 24
 UPLOAD_BUDGET_PER_FRAME         = 1 MiB
+FRUSTUM_CULLING_ENABLED         = true
+KEEP_COARSE_LOD_FALLBACK        = false
 RENDER_ACTIVATIONS_PER_FRAME    = 6
 RENDER_UPDATES_PER_FRAME        = 4
 RENDER_DEACTIVATIONS_PER_FRAME  = 8
@@ -83,6 +89,7 @@ PHYSICS_DEACTIVATIONS_PER_FRAME = 4
 POOL_WATERMARK_PER_CLASS        = 8 per surface class
 PHYSICS_POOL_WATERMARK          = 4
 WORKER_SCRATCH_COUNT            = one reusable scratch set per worker
+MAIN_CAMERA_FAR_CLIP            = 20000.0
 ```
 
 Why these are good starting values:
@@ -104,6 +111,8 @@ New explicit controls:
 - `MAX_LOD_CAP_PROJECT_SETTING`
 - `UPLOAD_BUDGET_PER_FRAME`
 - `PHYSICS_MAX_ACTIVE_CHUNKS`
+- `FRUSTUM_CULLING_ENABLED`
+- `KEEP_COARSE_LOD_FALLBACK`
 - per-kind render/physics commit budgets
 - `PHYSICS_POOL_WATERMARK`
 - `WORKER_SCRATCH_COUNT`
@@ -125,6 +134,7 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Delay resolution increases until profiling evidence exists.
 - [x] Expose the project-wide `max_lod` cap in the Godot editor instead of hardcoding it in Rust only.
 - [x] Expose the planet radius on `PlanetRoot` and show a matching editor preview sphere.
+- [x] Expose `PlanetRoot` toggles for frustum culling and coarse fallback chunk coverage.
 
 ## Prerequisites
 
@@ -152,19 +162,21 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Back-pressure controls are active and measurable.
 - [x] Any deviations from defaults are justified by profiling notes.
 - [x] Default runtime `max_lod` no longer produces sub-32-meter average finest chunks on small planets.
-- [x] Planet size and the global LOD cap are visible/editable from the Godot editor.
+- [x] Planet size, coarse-coverage behavior, frustum-culling behavior, and the global LOD cap are visible/editable from the Godot editor.
 
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage updated for the radius-derived `max_lod` policy and the new configurable cap. The default `planet_radius = 1000` profile still resolves to `max_lod = 5`, now reports `runtime_max_lod_cap = 10` with topology support through `16`, clamps metadata/payload precompute windows to the effective max, and keeps the average finest-chunk surface span above the `32 m` target while preserving the existing commit/upload/pool controls.
-- [x] Profiles and scenarios tested: unit tests covering the documented default numbers, cap behavior, budget saturation, physics-set limits, and pool watermark enforcement; default headless startup camera through the repository Godot binary in `../godot/bin`; editor-context headless startup to validate tool-mode `PlanetRoot` plus project-setting registration.
-- [x] Follow-up actions: if designers start using much larger radii, gather a moving-camera runtime trace with a raised `world2/runtime/max_lod_cap` before increasing mesh density or commit budgets further.
+- [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage updated for the new `enable_frustum_culling` and `keep_coarse_lod_chunks_rendered` controls, plus the raised `MainCamera.far = 20000.0` default. The default `planet_radius = 1000` profile still resolves to `max_lod = 5`, keeps frustum culling on by default, leaves coarse fallback off by default, and now allows a fully culled face to keep its root chunk selected when coarse fallback is enabled.
+- [x] Profiles and scenarios tested: unit tests covering the documented default numbers, frustum-bypass behavior, coarse-root fallback behavior, cap behavior, budget saturation, physics-set limits, and pool watermark enforcement; `./scripts/build_rust.sh` completed successfully; `./scripts/run_godot.sh --headless --quit-after 2` loaded the extension and main scene, reporting `strategy_summary=projection=spherified_cube visibility=horizon_frustum_lod frustum_culling=true coarse_lod_fallback=false render_backend=server_pool_render_backend staging=godot_owned_packed_byte_array` on startup.
+- [x] Follow-up actions: if coarse fallback is enabled in production, capture a moving-camera trace to measure the extra overlapping residency against the reduced risk of transient empty coverage during rapid camera motion.
 
 ## References
 
 - [RenderingServer - Godot docs (stable)](https://docs.godotengine.org/en/stable/classes/class_renderingserver.html)
 - [PhysicsServer3D - Godot docs (stable)](https://docs.godotengine.org/en/stable/classes/class_physicsserver3d.html)
+- [Camera3D - Godot docs (stable)](https://docs.godotengine.org/en/stable/classes/class_camera3d.html)
 - [Thread-safe APIs - Godot docs (stable)](https://docs.godotengine.org/en/stable/tutorials/performance/thread_safe_apis.html)
 - [godot-rust built-in types (packed arrays)](https://godot-rust.github.io/book/godot-api/builtins.html)
+- [godot-rust register/export docs](https://godot-rust.github.io/docs/gdext/master/godot/register/index.html)
 - [Project-local phase docs and runtime metrics policy](./README.md)

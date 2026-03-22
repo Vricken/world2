@@ -18,6 +18,62 @@ struct CommitBudgetUsage {
     physics_deactivations: usize,
 }
 
+struct DeactivationCoverageTracker {
+    candidates: Vec<ChunkKey>,
+    blocking_counts: HashMap<ChunkKey, usize>,
+}
+
+impl DeactivationCoverageTracker {
+    fn new(
+        candidates: Vec<ChunkKey>,
+        desired: &HashSet<ChunkKey>,
+        ready: &HashSet<ChunkKey>,
+    ) -> Self {
+        let mut blocking_counts = candidates
+            .iter()
+            .copied()
+            .map(|key| (key, 0usize))
+            .collect::<HashMap<_, _>>();
+
+        if !candidates.is_empty() {
+            for desired_key in desired.iter().copied().filter(|key| !ready.contains(key)) {
+                for candidate in &candidates {
+                    if keys_intersect_hierarchically(*candidate, desired_key) {
+                        *blocking_counts
+                            .get_mut(candidate)
+                            .expect("coverage tracker candidate must exist") += 1;
+                    }
+                }
+            }
+        }
+
+        Self {
+            candidates,
+            blocking_counts,
+        }
+    }
+
+    fn would_open_hole(&self, key: ChunkKey) -> bool {
+        self.blocking_counts.get(&key).copied().unwrap_or(0) > 0
+    }
+
+    fn mark_ready(&mut self, ready_key: ChunkKey) {
+        for candidate in &self.candidates {
+            if !keys_intersect_hierarchically(*candidate, ready_key) {
+                continue;
+            }
+
+            if let Some(count) = self.blocking_counts.get_mut(candidate) {
+                *count = count.saturating_sub(1);
+            }
+        }
+    }
+}
+
+fn keys_intersect_hierarchically(a: ChunkKey, b: ChunkKey) -> bool {
+    a.face == b.face && (a.is_descendant_of(&b) || b.is_descendant_of(&a))
+}
+
 impl PlanetRuntime {
     pub(crate) fn apply_budgeted_diffs(
         &mut self,
@@ -46,6 +102,35 @@ impl PlanetRuntime {
             .intersection(desired_physics)
             .copied()
             .collect::<HashSet<_>>();
+        let render_deactivation_keys = ops
+            .iter()
+            .filter_map(|op| match op.kind {
+                CommitOpKind::DeactivateRender => Some(op.key),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let physics_deactivation_keys = ops
+            .iter()
+            .filter_map(|op| match op.kind {
+                CommitOpKind::DeactivatePhysics => Some(op.key),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut render_deactivation_coverage = DeactivationCoverageTracker::new(
+            render_deactivation_keys,
+            desired_render,
+            &ready_render,
+        );
+        let mut physics_render_coverage = DeactivationCoverageTracker::new(
+            physics_deactivation_keys.clone(),
+            desired_render,
+            &ready_render,
+        );
+        let mut physics_deactivation_coverage = DeactivationCoverageTracker::new(
+            physics_deactivation_keys,
+            desired_physics,
+            &ready_physics,
+        );
 
         let mut committed = 0usize;
         let mut upload_bytes_committed = 0usize;
@@ -82,11 +167,11 @@ impl PlanetRuntime {
 
             let deactivation_would_open_hole = match op.kind {
                 CommitOpKind::DeactivateRender => {
-                    !Self::coverage_ready_for_key(op.key, desired_render, &ready_render)
+                    render_deactivation_coverage.would_open_hole(op.key)
                 }
                 CommitOpKind::DeactivatePhysics => {
-                    !Self::coverage_ready_for_key(op.key, desired_render, &ready_render)
-                        || !Self::coverage_ready_for_key(op.key, desired_physics, &ready_physics)
+                    physics_render_coverage.would_open_hole(op.key)
+                        || physics_deactivation_coverage.would_open_hole(op.key)
                 }
                 _ => false,
             };
@@ -116,11 +201,14 @@ impl PlanetRuntime {
                     CommitOpKind::ActivateRender => {
                         if desired_render.contains(&op.key) {
                             ready_render.insert(op.key);
+                            render_deactivation_coverage.mark_ready(op.key);
+                            physics_render_coverage.mark_ready(op.key);
                         }
                     }
                     CommitOpKind::ActivatePhysics => {
                         if desired_physics.contains(&op.key) {
                             ready_physics.insert(op.key);
+                            physics_deactivation_coverage.mark_ready(op.key);
                         }
                     }
                     _ => {}
@@ -196,13 +284,14 @@ impl PlanetRuntime {
             if !self.payload_matches_selection(key, desired_render)? {
                 continue;
             }
-            let meta = self.ensure_chunk_meta(key)?;
             ops.push(CommitOp {
                 kind: CommitOpKind::ActivateRender,
                 key,
                 upload_bytes: self.payload_upload_bytes(key),
                 priority_group: 0,
-                distance_key_mm: distance_sort_key(self.chunk_camera_distance(camera, &meta)),
+                distance_key_mm: distance_sort_key(
+                    self.chunk_camera_distance_for_key(camera, key)?,
+                ),
             });
         }
 
@@ -221,13 +310,14 @@ impl PlanetRuntime {
                 continue;
             }
 
-            let meta = self.ensure_chunk_meta(key)?;
             ops.push(CommitOp {
                 kind: CommitOpKind::UpdateRender,
                 key,
                 upload_bytes: self.payload_upload_bytes(key),
                 priority_group: 1,
-                distance_key_mm: distance_sort_key(self.chunk_camera_distance(camera, &meta)),
+                distance_key_mm: distance_sort_key(
+                    self.chunk_camera_distance_for_key(camera, key)?,
+                ),
             });
         }
 
@@ -240,15 +330,14 @@ impl PlanetRuntime {
             if !self.payload_matches_selection(key, desired_render)? {
                 continue;
             }
-            let meta = self.ensure_chunk_meta(key)?;
-            let distance = self.chunk_camera_distance(camera, &meta);
-            self.ensure_collision_payload(key);
             ops.push(CommitOp {
                 kind: CommitOpKind::ActivatePhysics,
                 key,
                 upload_bytes: 0,
                 priority_group: 2,
-                distance_key_mm: distance_sort_key(distance),
+                distance_key_mm: distance_sort_key(
+                    self.chunk_camera_distance_for_key(camera, key)?,
+                ),
             });
         }
 
@@ -259,14 +348,14 @@ impl PlanetRuntime {
             .collect::<Vec<_>>();
         render_deactivations.sort_unstable();
         for key in render_deactivations {
-            let meta = self.ensure_chunk_meta(key)?;
-            let distance = self.chunk_camera_distance(camera, &meta);
             ops.push(CommitOp {
                 kind: CommitOpKind::DeactivateRender,
                 key,
                 upload_bytes: 0,
                 priority_group: 3,
-                distance_key_mm: distance_sort_key(distance),
+                distance_key_mm: distance_sort_key(
+                    self.chunk_camera_distance_for_key(camera, key)?,
+                ),
             });
         }
 
@@ -277,14 +366,14 @@ impl PlanetRuntime {
             .collect::<Vec<_>>();
         physics_deactivations.sort_unstable();
         for key in physics_deactivations {
-            let meta = self.ensure_chunk_meta(key)?;
-            let distance = self.chunk_camera_distance(camera, &meta);
             ops.push(CommitOp {
                 kind: CommitOpKind::DeactivatePhysics,
                 key,
                 upload_bytes: 0,
                 priority_group: 4,
-                distance_key_mm: distance_sort_key(distance),
+                distance_key_mm: distance_sort_key(
+                    self.chunk_camera_distance_for_key(camera, key)?,
+                ),
             });
         }
 
@@ -1099,7 +1188,7 @@ impl PlanetRuntime {
     pub(crate) fn frustum_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {
         self.config
             .visibility_strategy
-            .frustum_visible(camera, meta)
+            .frustum_visible(&self.config, camera, meta)
     }
 
     pub(crate) fn projected_error_px(&self, camera: &CameraState, meta: &ChunkMeta) -> f32 {
@@ -1110,6 +1199,19 @@ impl PlanetRuntime {
 
     pub(crate) fn chunk_camera_distance(&self, camera: &CameraState, meta: &ChunkMeta) -> f64 {
         (meta.bounds.center_planet - camera.position_planet).length()
+    }
+
+    fn chunk_camera_distance_for_key(
+        &mut self,
+        camera: &CameraState,
+        key: ChunkKey,
+    ) -> Result<f64, TopologyError> {
+        if let Some(center_planet) = self.meta.center_planet(&key) {
+            return Ok((center_planet - camera.position_planet).length());
+        }
+
+        let meta = self.ensure_chunk_meta(key)?;
+        Ok(self.chunk_camera_distance(camera, &meta))
     }
 
     fn chunk_origin_planet_for_key(&self, key: ChunkKey) -> Option<DVec3> {

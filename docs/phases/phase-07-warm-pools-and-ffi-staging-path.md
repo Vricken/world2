@@ -20,7 +20,7 @@ What shipped:
 - CPU mesh derivation for visible vertices, including positions, sampled-field normals, tangents, UVs, colors/masks, and stitch-mask-driven canonical index selection.
 - Separate vertex, attribute, and index byte-region packing for the shipped surface class contract: `format_mask = 0x1B`, `vertex_stride = 12`, `attribute_stride = 24`, `index_stride = 4`.
 - Reusable Godot-owned `PackedByteArray` staging on the live runtime path, filled in place with `as_mut_slice()` data copies from the packed Rust regions.
-- Logical render lifecycle command assembly (`warm current`, `warm pooled`, `cold create`) and physics-ready collider payload attachment for physics-eligible chunks.
+- Logical render lifecycle command assembly (`warm current`, `warm pooled`, `cold create`) plus lazy collider derivation that keeps render payload installation independent from later physics activation.
 - Phase 07 counters exposed through the runtime tick logs, including sampled/meshed/packed/staged chunk counts and warm-vs-cold routing metrics.
 
 ## Documentation Checked Before Implementation
@@ -70,7 +70,7 @@ Constraints carried into code:
 
 ### Stage F - Build Commit Payloads
 
-- `PlanetRuntime::ensure_render_payload_for_selection()` assembles the final chunk payload, including surface class, stitch mask, packed regions, logical lifecycle command, transform, and optional collision mesh copies.
+- `PlanetRuntime::ensure_render_payload_for_selection()` assembles the final chunk payload, including surface class, stitch mask, packed regions, logical lifecycle command, transform, and lazy collision fallback hooks derived from the resident mesh only if physics later needs them.
 
 ### Stage G - Prepare Commit Transitions
 
@@ -79,7 +79,7 @@ Constraints carried into code:
 
 ## Deviation Notes
 
-- The original phase text implied metadata for every LOD at load. The shipped implementation now does exactly that by default up to the effective runtime `max_lod`, but stores only compact bounds/metrics in dense slabs instead of full `ChunkMeta` structs in a hash map so the default path avoids both runtime metadata misses and the older per-entry hash overhead. The config field still exists for tests and deliberate lower-memory experiments.
+- The original phase text implied metadata for every LOD at load. The shipped implementation now does exactly that by default up to the effective runtime `max_lod`, but stores compact bounds/metrics plus cached same-LOD neighbors in dense slabs instead of full `ChunkMeta` structs in a hash map so the default path avoids both runtime metadata misses and repeated neighbor reconstruction on the hot path. The config field still exists for tests and deliberate lower-memory experiments.
 - Payload precompute policy is now explicit in config, but payloads are still generated on demand for selected chunks rather than by a background worker.
 - Unit tests disable live Godot staging (`enable_godot_staging = false`) because `PackedByteArray` allocation requires the Godot engine runtime. The headless Godot validation path exercises the real staging behavior.
 - Phase 07 stops at payload generation and logical lifecycle preparation. The actual server-side RID commit path is still tracked in Phase 08.

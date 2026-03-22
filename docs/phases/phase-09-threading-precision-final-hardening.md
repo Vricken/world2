@@ -45,7 +45,7 @@ pub enum PlanetCommand {
 
 ## Implemented Threading Contract
 
-- workers: persistent Rust threads that sample, build metadata, mesh, byte-pack render payloads, precompute collision faces, and build desired asset-group snapshots
+- workers: persistent Rust threads that sample, build metadata, mesh, byte-pack render payloads, and build desired asset-group snapshots
 - commit side: single-lane warm/cold commit logic, RID ownership, pooled-entry routing, final `RenderingServer`/`PhysicsServer3D` calls, and asset-group diff application
 - handoff: mutex/condvar worker queues plus epoch-tagged requests/results, queue-side supersession of stale overlapping render jobs, and commit-lane stale-result rejection before install
 
@@ -91,12 +91,12 @@ This keeps the worker side aggressive without allowing old intermediate LOD work
 - the older async metadata request plumbing remains in code as a defensive/non-shipping fallback path
 - neighbor-LOD normalization now requests the missing coarse-side child metadata and temporarily collapses the over-fine side back to the nearest valid ancestor for that frame, instead of retrying the same unresolved split in a hot loop or leaving an invalid delta>1 seam in the selected set
 - ready metadata results are installed only if their epoch still matches the runtime's pending request table
-- resident metadata storage is now a dense slab indexed by `(lod, face, x, y)` and stores only compact bounds/metrics; `ChunkKey`, same-LOD neighbors, and the base surface class are reconstructed on access instead of stored redundantly per entry
+- resident metadata storage is now a dense slab indexed by `(lod, face, x, y)` and stores compact bounds/metrics plus cached same-LOD neighbors; `ChunkKey` and the base surface class are reconstructed on access without re-deriving topology neighbors on the selection hot path
 
 ## Async Collision Prep Rules
 
-- render-payload workers now derive collider vertices, collider indices, and flattened concave face vertices from the sampled mesh
-- commit-lane physics activation only converts the precomputed face list into Godot packed arrays and refreshes the shape/body RIDs
+- render-payload workers no longer precompute collider copies for every chunk
+- commit-lane physics activation derives collider vertices, indices, and flattened concave faces lazily from the resident mesh only for chunks that actually enter the bounded physics set, then converts that data into Godot packed arrays and refreshes the shape/body RIDs
 - the legacy on-lane collision derivation path remains only as a defensive fallback when older test helpers construct partial payloads
 
 ## Async Asset-Group Rules
@@ -114,7 +114,7 @@ This keeps the worker side aggressive without allowing old intermediate LOD work
 - reset/refill instead of reconstructing large buffers
 - convert to Godot staging only at final commit boundary
 
-The current worker implementation reuses sample, mesh, pack, and slope-height scratch inside each worker thread, then clones the finished data into resident payload storage owned by the runtime.
+The current worker implementation reuses sample, mesh, pack, and slope-height scratch inside each worker thread, then clones only the finished render payload data that must remain resident while deferring collision-only copies until physics activation needs them.
 
 ## Implementation Notes
 
@@ -124,7 +124,7 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 - Worker results are sorted by `(epoch, sequence)` before any runtime state or Godot staging is touched.
 - `pending_payload_requests`, `pending_meta_requests`, and `pending_asset_group_epoch` in `PlanetRuntime` are now the authorities for whether a completed worker result is still valid.
 - Warm-path routing (`ReuseCurrentSurface`, `ReusePooledSurface`, `ColdCreate`) remains commit-lane only.
-- Physics activation remains commit-lane only, but collider face preprocessing now happens off-thread before the payload is installed.
+- Physics activation remains commit-lane only, and collider payload expansion now stays lazy until activation time.
 - Mode B is not implemented. There is no worker-side server mutation path in shipping code.
 
 ## Checklist
@@ -181,7 +181,7 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed `62/62`; the worker path now supports async render payload submission, dense slab-backed metadata storage that removes the old per-entry hash overhead from the resident metadata set, startup metadata prebuild through runtime `max_lod`, off-thread collision face preprocessing, async asset-group snapshot preparation, queue-side supersession of older overlapping jobs, and epoch-based stale-result dropping before install. Headless runtime logs now expose `worker_submitted`, `worker_ready`, `worker_stale`, `worker_superseded`, and `worker_inflight` alongside the existing queue and scratch metrics.
+- [x] Result summary: `cargo test` now passes `65/65`, and `./scripts/build_rust.sh` builds successfully. The worker path supports async render payload submission, dense slab-backed metadata storage that removes the old per-entry hash overhead from the resident metadata set, cached same-LOD neighbors inside those slabs so selection stops reconstructing them on every access, startup metadata prebuild through runtime `max_lod`, async asset-group snapshot preparation, queue-side supersession of older overlapping jobs, and epoch-based stale-result dropping before install. Collision-only copies are no longer precomputed for every render payload; they are derived lazily on the commit lane only for chunks that actually enter the bounded physics set. Headless/runtime logs still expose `worker_submitted`, `worker_ready`, `worker_stale`, `worker_superseded`, and `worker_inflight` alongside the existing queue and scratch metrics.
 - [x] Mode tested: Mode A only
 - [x] Follow-up actions: if profiling still shows worker generation dominating after the new async queue and lower default LOD depth, consider deeper batching/coalescing or a larger ownership refactor before exploring a GPU-assisted generation path.
 

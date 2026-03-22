@@ -468,22 +468,26 @@ impl PlanetRuntime {
         Ok(packed)
     }
 
-    fn select_render_set(
+    pub(crate) fn select_render_set(
         &mut self,
         camera: &CameraState,
         frame_state: &mut SelectionFrameState,
     ) -> Result<HashSet<ChunkKey>, TopologyError> {
-        let mut selected = HashSet::new();
+        let mut selected = HashSet::with_capacity(self.active_render.len().max(Face::ALL.len()));
         let split_ancestors = self.build_current_split_ancestors();
 
         for face in Face::ALL {
-            self.select_render_chunk(
-                ChunkKey::new(face, 0, 0, 0),
+            let key = ChunkKey::new(face, 0, 0, 0);
+            let selected_any = self.select_render_chunk(
+                key,
                 camera,
                 &mut selected,
                 &split_ancestors,
                 frame_state,
             )?;
+            if !selected_any && self.config.keep_coarse_lod_chunks_rendered {
+                selected.insert(key);
+            }
         }
 
         frame_state.neighbor_split_count = self.normalize_neighbor_lod_delta(&mut selected)?;
@@ -499,16 +503,16 @@ impl PlanetRuntime {
         selected: &mut HashSet<ChunkKey>,
         split_ancestors: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
-    ) -> Result<(), TopologyError> {
+    ) -> Result<bool, TopologyError> {
         let meta = self.ensure_chunk_meta(key)?;
 
         if !self.horizon_visible(camera, &meta) {
-            return Ok(());
+            return Ok(false);
         }
         frame_state.horizon_survivor_count += 1;
 
         if !self.frustum_visible(camera, &meta) {
-            return Ok(());
+            return Ok(false);
         }
         frame_state.frustum_survivor_count += 1;
 
@@ -529,27 +533,43 @@ impl PlanetRuntime {
             }
 
             if all_children_ready {
+                let mut selected_any = false;
                 for child in children.iter().copied() {
-                    self.select_render_chunk(
+                    let child_selected = self.select_render_chunk(
                         child,
                         camera,
                         selected,
                         split_ancestors,
                         frame_state,
                     )?;
+                    if child_selected {
+                        selected_any = true;
+                    } else if self.config.keep_coarse_lod_chunks_rendered {
+                        selected.insert(child);
+                        selected_any = true;
+                    }
+                }
+                if selected_any {
+                    return Ok(true);
                 }
             } else {
                 selected.insert(key);
+                return Ok(true);
             }
         } else {
             selected.insert(key);
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     fn build_current_split_ancestors(&self) -> HashSet<ChunkKey> {
-        let mut split_ancestors = HashSet::new();
+        let mut split_ancestors = HashSet::with_capacity(
+            self.active_render
+                .len()
+                .saturating_mul(usize::from(self.config.max_lod)),
+        );
 
         for key in &self.active_render {
             let mut ancestor = key.parent();
@@ -588,9 +608,11 @@ impl PlanetRuntime {
             let mut collapse_targets = HashSet::new();
 
             for key in selected.iter().copied().collect::<Vec<_>>() {
-                for edge in Edge::ALL {
-                    let neighbor_same_lod = topology::same_lod_neighbor(key, edge)?;
-
+                let neighbors = self
+                    .meta
+                    .neighbors(&key)
+                    .unwrap_or(topology::same_lod_neighbors(key)?);
+                for neighbor_same_lod in neighbors.same_lod {
                     if let Some(active_ancestor) =
                         Self::find_active_ancestor_covering(neighbor_same_lod, selected)
                     {
@@ -727,11 +749,14 @@ impl PlanetRuntime {
         key: ChunkKey,
         desired_render: &HashSet<ChunkKey>,
     ) -> Result<SurfaceClassKey, TopologyError> {
-        let meta = self.ensure_chunk_meta(key)?;
+        let neighbors = self
+            .meta
+            .neighbors(&key)
+            .unwrap_or(topology::same_lod_neighbors(key)?);
         let mut neighbor_lods = [key.lod; Edge::ALL.len()];
 
         for (index, edge) in Edge::ALL.into_iter().enumerate() {
-            let neighbor_same_lod = meta.neighbors.get(edge);
+            let neighbor_same_lod = neighbors.get(edge);
             if let Some(covering_key) =
                 Self::find_active_ancestor_covering(neighbor_same_lod, desired_render)
             {
@@ -776,10 +801,6 @@ impl PlanetRuntime {
             .pack_mesh_regions(&mesh, &request.surface_class)
             .expect("phase 7 packer must match configured surface strides");
         let placement = build_chunk_asset_placement(&self.config, key);
-        let collider_vertices = mesh.positions.clone();
-        let collider_indices = mesh.indices.clone();
-        let collider_faces =
-            collider_face_vertices_from_indices(&collider_vertices, &collider_indices);
         let prepared = PreparedRenderPayload {
             sequence: request.sequence,
             epoch: request.epoch,
@@ -791,9 +812,9 @@ impl PlanetRuntime {
             chunk_origin_planet: request.chunk_origin_planet,
             mesh,
             assets: placement.assets,
-            collider_vertices,
-            collider_indices,
-            collider_faces,
+            collider_vertices: None,
+            collider_indices: None,
+            collider_faces: None,
             packed_regions,
             scratch_metrics: super::super::workers::payloads::WorkerScratchJobMetrics::default(),
         };
@@ -950,6 +971,7 @@ impl PlanetRuntime {
             .unwrap_or(false))
     }
 
+    #[cfg(test)]
     pub(crate) fn desired_keys_intersecting<'a>(
         key: ChunkKey,
         desired: &'a HashSet<ChunkKey>,
@@ -964,6 +986,7 @@ impl PlanetRuntime {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn coverage_ready_for_key(
         key: ChunkKey,
         desired: &HashSet<ChunkKey>,
@@ -1074,9 +1097,9 @@ impl PlanetRuntime {
                 _ => None,
             },
             assets,
-            collider_vertices: Some(collider_vertices),
-            collider_indices: Some(collider_indices),
-            collider_faces: Some(collider_faces),
+            collider_vertices,
+            collider_indices,
+            collider_faces,
             render_lifecycle,
         };
         if let Some(previous_payload) = self.resident_payloads.insert(key, payload) {

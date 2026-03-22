@@ -19,6 +19,10 @@ glow_enabled = true
 radius = 0.4
 height = 1.6
 
+[sub_resource type="SphereMesh" id="SphereMesh_o5qli"]
+radius = 10000.0
+height = 20000.0
+
 [node name="PlanetRoot" type="PlanetRoot" unique_id=1423041356]
 planet_radius = 10000.0
 
@@ -44,6 +48,10 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
 
 [node name="MainCamera" type="Camera3D" parent="PlayerController/PitchPivot" unique_id=404168182]
 current = true
+far = 20000.0
 
 [node name="CSGBox3D" type="CSGBox3D" parent="." unique_id=72538160]
 transform = Transform3D(32, 0, 0, 0, 40000, 0, 0, 0, 32, 0, 0, 0)
+
+[node name="__World2EditorPreview" type="MeshInstance3D" parent="." unique_id=731040843]
+mesh = SubResource("SphereMesh_o5qli")

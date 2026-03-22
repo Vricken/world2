@@ -30,9 +30,9 @@ pub(crate) struct PreparedRenderPayload {
     pub chunk_origin_planet: DVec3,
     pub mesh: CpuMeshBuffers,
     pub assets: Vec<AssetInstance>,
-    pub collider_vertices: Vec<[f32; 3]>,
-    pub collider_indices: Vec<i32>,
-    pub collider_faces: Vec<[f32; 3]>,
+    pub collider_vertices: Option<Vec<[f32; 3]>>,
+    pub collider_indices: Option<Vec<i32>>,
+    pub collider_faces: Option<Vec<[f32; 3]>>,
     pub packed_regions: PackedMeshRegions,
     pub scratch_metrics: WorkerScratchJobMetrics,
 }
@@ -156,7 +156,12 @@ impl WorkerScratch {
                 all_reused = false;
             }
             buffer.clear();
-            buffer.resize(required, 0);
+            // `pack_mesh_regions_into()` overwrites every byte that participates in the
+            // configured surface layout, so we avoid zero-filling here and only clear
+            // explicit stride padding inside the packer when a class actually has padding.
+            unsafe {
+                buffer.set_len(required);
+            }
         }
 
         (all_reused, growth_events)
@@ -414,9 +419,6 @@ fn build_render_payload_with_scratch(
         &mut scratch.index_region,
     );
     let placement = build_chunk_asset_placement(&request.config, request.key);
-    let collider_vertices = scratch.mesh.positions.clone();
-    let collider_indices = scratch.mesh.indices.clone();
-    let collider_faces = collider_face_vertices_from_indices(&collider_vertices, &collider_indices);
 
     PreparedRenderPayload {
         sequence: request.sequence,
@@ -429,9 +431,9 @@ fn build_render_payload_with_scratch(
         chunk_origin_planet: request.chunk_origin_planet,
         mesh: scratch.mesh.clone(),
         assets: placement.assets,
-        collider_vertices,
-        collider_indices,
-        collider_faces,
+        collider_vertices: None,
+        collider_indices: None,
+        collider_faces: None,
         packed_regions: PackedMeshRegions {
             vertex_region: scratch.vertex_region.clone(),
             attribute_region: scratch.attribute_region.clone(),
@@ -459,19 +461,22 @@ fn sample_chunk_scalar_field_into(
     samples_per_edge: u32,
     scratch: &mut WorkerScratch,
 ) {
-    let visible_quads = f64::from(mesh_topology::QUADS_PER_EDGE);
+    let visible_quads_recip = 1.0 / f64::from(mesh_topology::QUADS_PER_EDGE);
     let border = f64::from(mesh_topology::BORDER_RING_QUADS);
+    let height_amplitude = config.height_amplitude;
+    let height_amplitude_f32 = height_amplitude as f32;
+    let moisture_axis = DVec3::new(1.731, -0.613, 0.947);
     let terrain = TerrainFieldSettings {
         planet_radius: config.planet_radius,
-        height_amplitude: config.height_amplitude,
+        height_amplitude,
         ..TerrainFieldSettings::default()
     };
 
     for y in 0..samples_per_edge {
         for x in 0..samples_per_edge {
             let chunk_uv = DVec2::new(
-                (f64::from(x) - border) / visible_quads,
-                (f64::from(y) - border) / visible_quads,
+                (f64::from(x) - border) * visible_quads_recip,
+                (f64::from(y) - border) * visible_quads_recip,
             );
             let face_uv =
                 chunk_uv_to_face_uv(key, chunk_uv).expect("phase 9 worker keys must be valid");
@@ -481,15 +486,16 @@ fn sample_chunk_scalar_field_into(
                 .project(normalize_to_cube_surface(cube_point));
             let height = terrain
                 .sample_height(unit_dir)
-                .clamp(-config.height_amplitude, config.height_amplitude)
-                as f32;
+                .clamp(-height_amplitude, height_amplitude) as f32;
             let temperature = (1.0 - unit_dir.y.abs()) as f32;
-            let moisture_signal =
-                (unit_dir.dot(DVec3::new(1.731, -0.613, 0.947)).sin() * 0.5 + 0.5) as f32;
+            let moisture_signal = (unit_dir.dot(moisture_axis).sin() * 0.5 + 0.5) as f32;
             let biome0 = moisture_signal.clamp(0.0, 1.0);
-            let biome1 = ((temperature * 0.75)
-                + ((height / config.height_amplitude as f32) * 0.25 + 0.25))
-                .clamp(0.0, 1.0);
+            let height_ratio = if height_amplitude_f32 <= f32::EPSILON {
+                0.0
+            } else {
+                height / height_amplitude_f32
+            };
+            let biome1 = ((temperature * 0.75) + (height_ratio * 0.25 + 0.25)).clamp(0.0, 1.0);
 
             scratch.samples.push(ChunkSample {
                 unit_dir,
@@ -546,6 +552,7 @@ fn derive_cpu_mesh_buffers_into(
 ) {
     let topology = mesh_topology::canonical_chunk_topology();
     let visible_edge = mesh_topology::VISIBLE_VERTICES_PER_EDGE;
+    let uv_scale = 1.0 / mesh_topology::QUADS_PER_EDGE as f32;
     mesh.indices.extend_from_slice(
         topology
             .stitch_indices(stitch_mask)
@@ -579,10 +586,7 @@ fn derive_cpu_mesh_buffers_into(
                 tangent_u.z as f32,
                 1.0,
             ]);
-            mesh.uvs.push([
-                x as f32 / mesh_topology::QUADS_PER_EDGE as f32,
-                y as f32 / mesh_topology::QUADS_PER_EDGE as f32,
-            ]);
+            mesh.uvs.push([x as f32 * uv_scale, y as f32 * uv_scale]);
             mesh.colors
                 .push([sample.biome0, sample.biome1, sample.slope_hint, 1.0]);
         }
@@ -600,6 +604,22 @@ fn pack_mesh_regions_into(
     attribute_region: &mut [u8],
     index_region: &mut [u8],
 ) {
+    if surface_class.vertex_stride > DEFAULT_RENDER_VERTEX_STRIDE {
+        vertex_region.fill(0);
+    }
+    let attribute_bytes_written =
+        if surface_class.attribute_stride >= PACKED_COLOR_OFFSET + PACKED_COLOR_BYTES {
+            PACKED_COLOR_OFFSET + PACKED_COLOR_BYTES
+        } else {
+            PACKED_NORMAL_BYTES + PACKED_UV_BYTES
+        };
+    if surface_class.attribute_stride > attribute_bytes_written {
+        attribute_region.fill(0);
+    }
+    if surface_class.index_stride > DEFAULT_RENDER_INDEX_STRIDE {
+        index_region.fill(0);
+    }
+
     for (index, position) in mesh.positions.iter().enumerate() {
         let offset = index * surface_class.vertex_stride;
         write_f32x3(
@@ -608,22 +628,29 @@ fn pack_mesh_regions_into(
         );
     }
 
-    for index in 0..mesh.vertex_count() {
+    for (index, ((normal, uv), color)) in mesh
+        .normals
+        .iter()
+        .copied()
+        .zip(mesh.uvs.iter().copied())
+        .zip(mesh.colors.iter().copied())
+        .enumerate()
+    {
         let offset = index * surface_class.attribute_stride;
         write_f32x3(
             &mut attribute_region[offset..offset + PACKED_NORMAL_BYTES],
-            mesh.normals[index],
+            normal,
         );
         write_f32x2(
             &mut attribute_region
                 [offset + PACKED_NORMAL_BYTES..offset + PACKED_NORMAL_BYTES + PACKED_UV_BYTES],
-            mesh.uvs[index],
+            uv,
         );
         if surface_class.attribute_stride >= PACKED_COLOR_OFFSET + PACKED_COLOR_BYTES {
             write_rgba8(
                 &mut attribute_region[offset + PACKED_COLOR_OFFSET
                     ..offset + PACKED_COLOR_OFFSET + PACKED_COLOR_BYTES],
-                mesh.colors[index],
+                color,
             );
         }
     }

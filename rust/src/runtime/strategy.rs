@@ -31,7 +31,12 @@ pub trait ChunkVisibilityStrategy {
         camera: &CameraState,
         meta: &ChunkMeta,
     ) -> bool;
-    fn frustum_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool;
+    fn frustum_visible(
+        &self,
+        config: &RuntimeConfig,
+        camera: &CameraState,
+        meta: &ChunkMeta,
+    ) -> bool;
     fn screen_error_px(&self, camera: &CameraState, meta: &ChunkMeta) -> f32;
 }
 
@@ -59,9 +64,14 @@ impl ChunkVisibilityStrategy for VisibilityStrategyKind {
         }
     }
 
-    fn frustum_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {
+    fn frustum_visible(
+        &self,
+        config: &RuntimeConfig,
+        camera: &CameraState,
+        meta: &ChunkMeta,
+    ) -> bool {
         match self {
-            Self::HorizonFrustumLod => default_frustum_visible(camera, meta),
+            Self::HorizonFrustumLod => default_frustum_visible(config, camera, meta),
         }
     }
 
@@ -214,7 +224,11 @@ fn default_horizon_visible(config: &RuntimeConfig, camera: &CameraState, meta: &
     theta <= beta_camera + beta_chunk + f64::from(meta.metrics.angular_radius) + angular_slack
 }
 
-fn default_frustum_visible(camera: &CameraState, meta: &ChunkMeta) -> bool {
+fn default_frustum_visible(config: &RuntimeConfig, camera: &CameraState, meta: &ChunkMeta) -> bool {
+    if !config.enable_frustum_culling {
+        return true;
+    }
+
     let center = dvec3_to_vector3(meta.bounds.center_planet - camera.origin.render_origin_planet);
     let radius = meta.bounds.radius as f32;
 
