@@ -39,6 +39,7 @@ pub(crate) struct PreparedPayloadBatch {
 #[derive(Default)]
 struct WorkerScratch {
     samples: Vec<ChunkSample>,
+    heights: Vec<f32>,
     mesh: CpuMeshBuffers,
     vertex_region: Vec<u8>,
     attribute_region: Vec<u8>,
@@ -313,6 +314,7 @@ fn build_render_payload_with_scratch(
 
     sample_chunk_scalar_field_into(&request.config, request.key, samples_per_edge, scratch);
     fill_sample_slope_hints_for(
+        &mut scratch.heights,
         &mut scratch.samples,
         samples_per_edge,
         request.config.height_amplitude,
@@ -418,24 +420,26 @@ fn sample_chunk_scalar_field_into(
 }
 
 fn fill_sample_slope_hints_for(
+    height_scratch: &mut Vec<f32>,
     samples: &mut [ChunkSample],
     samples_per_edge: u32,
     height_amplitude: f64,
 ) {
-    let heights = samples
-        .iter()
-        .map(|sample| sample.height)
-        .collect::<Vec<_>>();
+    if height_scratch.capacity() < samples.len() {
+        height_scratch.reserve(samples.len().saturating_sub(height_scratch.capacity()));
+    }
+    height_scratch.clear();
+    height_scratch.extend(samples.iter().map(|sample| sample.height));
 
     for y in 0..samples_per_edge {
         for x in 0..samples_per_edge {
-            let left = heights[(clamp_grid_index(x as i32 - 1, samples_per_edge) as u32
+            let left = height_scratch[(clamp_grid_index(x as i32 - 1, samples_per_edge) as u32
                 + y * samples_per_edge) as usize];
-            let right = heights[(clamp_grid_index(x as i32 + 1, samples_per_edge) as u32
+            let right = height_scratch[(clamp_grid_index(x as i32 + 1, samples_per_edge) as u32
                 + y * samples_per_edge) as usize];
-            let down = heights[(x + clamp_grid_index(y as i32 - 1, samples_per_edge) as u32
+            let down = height_scratch[(x + clamp_grid_index(y as i32 - 1, samples_per_edge) as u32
                 * samples_per_edge) as usize];
-            let up = heights[(x + clamp_grid_index(y as i32 + 1, samples_per_edge) as u32
+            let up = height_scratch[(x + clamp_grid_index(y as i32 + 1, samples_per_edge) as u32
                 * samples_per_edge) as usize];
             let gradient = ((right - left).powi(2) + (up - down).powi(2)).sqrt();
             let slope_hint = if height_amplitude <= f64::from(f32::EPSILON) {

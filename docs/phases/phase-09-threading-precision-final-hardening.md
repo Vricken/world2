@@ -82,7 +82,7 @@ The current codebase implements option `1`.
 - reset/refill instead of reconstructing large buffers
 - convert to Godot staging only at final commit boundary
 
-The current worker implementation reuses sample, mesh, and pack scratch inside each worker thread, then clones the finished data into resident payload storage owned by the runtime.
+The current worker implementation reuses sample, mesh, pack, and slope-height scratch inside each worker thread, then clones the finished data into resident payload storage owned by the runtime.
 
 ## Implementation Notes
 
@@ -131,14 +131,14 @@ The current worker implementation reuses sample, mesh, and pack scratch inside e
 
 - The earlier master-plan wording allowed a lock-free queue or a double-buffered command list. The shipped implementation uses a persistent mutex/condvar queue with deterministic sequence ordering because it is simpler to reason about and matches the current safety goals.
 - The earlier master-plan wording described a more aggressive Mode B. The current phase text intentionally removes that path; shipping code is Mode A only.
-- Scratch reuse currently targets worker-side generation buffers. Resident payload storage still owns its final mesh and packed buffers after handoff.
+- Scratch reuse currently targets worker-side generation buffers. Resident payload storage still owns its final mesh and packed buffers after handoff, so the current optimization pass focused on removing temporary worker allocations before attempting a larger ownership refactor.
 
 ## Test Record
 
-- [x] Date: 2026-03-21
-- [x] Result summary: `cargo test` passed `32/32`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and logged `worker_threads=4`, `worker_jobs=5`, `worker_queue_peak=5`, `worker_waits=5`, `sample_scratch_reuse=1`, `mesh_scratch_reuse=1`, `pack_scratch_reuse=1`, `scratch_growth=40`, `render_cold_commits=5`, `physics_commits=1`, and `deferred_ops=0`.
+- [x] Date: 2026-03-22
+- [x] Result summary: `cargo test` passed `42/42`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and logged `worker_threads=4`, `worker_jobs=5`, `worker_queue_peak=5`, `worker_waits=4`, `sample_scratch_reuse=1`, `mesh_scratch_reuse=1`, `pack_scratch_reuse=1`, `scratch_growth=40`, `render_cold_commits=5`, `physics_commits=0`, and `deferred_ops=0`.
 - [x] Mode tested: Mode A only
-- [x] Follow-up actions: Phase 10 can now build on the completed worker/commit ownership contract.
+- [x] Follow-up actions: if post-fix profiling shows worker generation dominant again after the visibility/physics reductions, reevaluate a larger ownership refactor or a GPU-assisted generation path from this cleaner baseline.
 
 ## References
 

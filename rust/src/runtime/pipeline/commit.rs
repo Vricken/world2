@@ -9,6 +9,15 @@ struct CommitOp {
     distance_key_mm: u64,
 }
 
+#[derive(Default)]
+struct CommitBudgetUsage {
+    render_activations: usize,
+    render_updates: usize,
+    render_deactivations: usize,
+    physics_activations: usize,
+    physics_deactivations: usize,
+}
+
 impl PlanetRuntime {
     pub(crate) fn apply_budgeted_diffs(
         &mut self,
@@ -32,14 +41,36 @@ impl PlanetRuntime {
         let mut upload_bytes_committed = 0usize;
         let mut deferred_upload_bytes = 0usize;
         let mut deferred_now = HashSet::new();
+        let mut budget_usage = CommitBudgetUsage::default();
 
         for op in ops {
             let over_commit_budget = committed >= self.config.commit_budget_per_frame;
             let over_upload_budget = op.upload_bytes > 0
                 && upload_bytes_committed + op.upload_bytes
                     > self.config.upload_budget_bytes_per_frame;
+            let over_kind_budget = match op.kind {
+                CommitOpKind::ActivateRender => {
+                    budget_usage.render_activations
+                        >= self.config.render_activation_budget_per_frame
+                }
+                CommitOpKind::UpdateRender => {
+                    budget_usage.render_updates >= self.config.render_update_budget_per_frame
+                }
+                CommitOpKind::DeactivateRender => {
+                    budget_usage.render_deactivations
+                        >= self.config.render_deactivation_budget_per_frame
+                }
+                CommitOpKind::ActivatePhysics => {
+                    budget_usage.physics_activations
+                        >= self.config.physics_activation_budget_per_frame
+                }
+                CommitOpKind::DeactivatePhysics => {
+                    budget_usage.physics_deactivations
+                        >= self.config.physics_deactivation_budget_per_frame
+                }
+            };
 
-            if over_commit_budget || over_upload_budget {
+            if over_commit_budget || over_upload_budget || over_kind_budget {
                 deferred_upload_bytes += op.upload_bytes;
                 deferred_now.insert(DeferredOpKey::new(op.kind, op.key));
                 continue;
@@ -48,6 +79,13 @@ impl PlanetRuntime {
             self.apply_commit_op(op, frame_state);
             committed += 1;
             upload_bytes_committed += op.upload_bytes;
+            match op.kind {
+                CommitOpKind::ActivateRender => budget_usage.render_activations += 1,
+                CommitOpKind::UpdateRender => budget_usage.render_updates += 1,
+                CommitOpKind::DeactivateRender => budget_usage.render_deactivations += 1,
+                CommitOpKind::ActivatePhysics => budget_usage.physics_activations += 1,
+                CommitOpKind::DeactivatePhysics => budget_usage.physics_deactivations += 1,
+            }
         }
 
         for key in &deferred_now {
@@ -271,17 +309,24 @@ impl PlanetRuntime {
         key: ChunkKey,
         frame_state: &mut SelectionFrameState,
     ) -> bool {
-        let Some(payload) = self.resident_payloads.get_mut(&key) else {
-            return false;
+        let (
+            surface_class,
+            chunk_origin_planet,
+            render_lifecycle,
+            mut gd_staging,
+            pooled_render_entry,
+        ) = {
+            let Some(payload) = self.resident_payloads.get_mut(&key) else {
+                return false;
+            };
+            (
+                payload.surface_class.clone(),
+                payload.chunk_origin_planet,
+                payload.render_lifecycle.clone(),
+                payload.gd_staging.take(),
+                payload.pooled_render_entry.take(),
+            )
         };
-
-        let surface_class = payload.surface_class.clone();
-        let chunk_origin_planet = payload.chunk_origin_planet;
-        let render_lifecycle = payload.render_lifecycle.clone();
-        let mesh = payload.mesh.clone();
-        let packed_regions = payload.packed_regions.clone();
-        let mut gd_staging = payload.gd_staging.take();
-        let pooled_render_entry = payload.pooled_render_entry.take();
 
         let render_transform = self.render_transform_for_chunk(chunk_origin_planet);
 
@@ -294,21 +339,26 @@ impl PlanetRuntime {
                         return self.commit_render_payload_cold(
                             key,
                             surface_class,
-                            mesh,
-                            packed_regions,
                             gd_staging.take(),
                             render_transform,
                             frame_state,
                         );
                     };
+                    let arrays = {
+                        let Some(payload) = self.resident_payloads.get(&key) else {
+                            return false;
+                        };
+                        cpu_mesh_to_surface_arrays(&payload.mesh)
+                    };
                     let Some(staging) = self.ensure_commit_staging(
                         gd_staging.take(),
-                        packed_regions.as_ref(),
+                        self.resident_payloads
+                            .get(&key)
+                            .and_then(|payload| payload.packed_regions.as_ref()),
                         &surface_class,
                     ) else {
                         return false;
                     };
-                    let arrays = cpu_mesh_to_surface_arrays(&mesh);
 
                     rendering_server.mesh_clear(mesh_rid);
                     rendering_server.mesh_add_surface_from_arrays(
@@ -329,8 +379,6 @@ impl PlanetRuntime {
                         return self.commit_render_payload_cold(
                             key,
                             surface_class,
-                            mesh,
-                            packed_regions,
                             gd_staging.take(),
                             render_transform,
                             frame_state,
@@ -342,12 +390,19 @@ impl PlanetRuntime {
 
                     let Some(staging) = self.ensure_commit_staging(
                         gd_staging.take().or(entry.gd_staging),
-                        packed_regions.as_ref(),
+                        self.resident_payloads
+                            .get(&key)
+                            .and_then(|payload| payload.packed_regions.as_ref()),
                         &surface_class,
                     ) else {
                         return false;
                     };
-                    let arrays = cpu_mesh_to_surface_arrays(&mesh);
+                    let arrays = {
+                        let Some(payload) = self.resident_payloads.get(&key) else {
+                            return false;
+                        };
+                        cpu_mesh_to_surface_arrays(&payload.mesh)
+                    };
 
                     rendering_server.mesh_clear(entry.mesh_rid);
                     rendering_server.mesh_add_surface_from_arrays(
@@ -376,8 +431,6 @@ impl PlanetRuntime {
                     return self.commit_render_payload_cold(
                         key,
                         surface_class,
-                        mesh,
-                        packed_regions,
                         gd_staging.take(),
                         render_transform,
                         frame_state,
@@ -427,8 +480,6 @@ impl PlanetRuntime {
         &mut self,
         key: ChunkKey,
         surface_class: SurfaceClassKey,
-        mesh: CpuMeshBuffers,
-        packed_regions: Option<PackedMeshRegions>,
         staging: Option<GdPackedStaging>,
         render_transform: Transform3D,
         frame_state: &mut SelectionFrameState,
@@ -440,7 +491,12 @@ impl PlanetRuntime {
 
             let mut rendering_server = RenderingServer::singleton();
             let mesh_rid = rendering_server.mesh_create();
-            let arrays = cpu_mesh_to_surface_arrays(&mesh);
+            let arrays = {
+                let Some(payload) = self.resident_payloads.get(&key) else {
+                    return false;
+                };
+                cpu_mesh_to_surface_arrays(&payload.mesh)
+            };
             rendering_server.mesh_add_surface_from_arrays(
                 mesh_rid,
                 PrimitiveType::TRIANGLES,
@@ -452,8 +508,13 @@ impl PlanetRuntime {
             rendering_server.instance_set_transform(render_instance_rid, render_transform);
             rendering_server.instance_set_visible(render_instance_rid, true);
 
-            let staging =
-                self.ensure_commit_staging(staging, packed_regions.as_ref(), &surface_class);
+            let staging = self.ensure_commit_staging(
+                staging,
+                self.resident_payloads
+                    .get(&key)
+                    .and_then(|payload| payload.packed_regions.as_ref()),
+                &surface_class,
+            );
             self.install_render_entry(key, mesh_rid, render_instance_rid, surface_class, staging);
         } else {
             if let Some(previous_entry) = self.take_current_render_entry(key) {
@@ -472,16 +533,12 @@ impl PlanetRuntime {
     ) -> bool {
         self.ensure_collision_payload(key);
 
-        let Some(payload) = self.resident_payloads.get(&key) else {
-            return false;
+        let physics_transform = {
+            let Some(payload) = self.resident_payloads.get(&key) else {
+                return false;
+            };
+            self.physics_transform_for_chunk(payload.chunk_origin_planet)
         };
-        let Some(collider_vertices) = payload.collider_vertices.clone() else {
-            return false;
-        };
-        let Some(collider_indices) = payload.collider_indices.clone() else {
-            return false;
-        };
-        let physics_transform = self.physics_transform_for_chunk(payload.chunk_origin_planet);
 
         let pooled_entry = self.pop_physics_pool_entry();
         let (physics_body_rid, physics_shape_rid) = match pooled_entry {
@@ -500,7 +557,18 @@ impl PlanetRuntime {
         };
 
         if self.should_commit_to_servers() {
-            let collider_faces = collider_faces_from_indices(&collider_vertices, &collider_indices);
+            let collider_faces = {
+                let Some(payload) = self.resident_payloads.get(&key) else {
+                    return false;
+                };
+                let Some(collider_vertices) = payload.collider_vertices.as_deref() else {
+                    return false;
+                };
+                let Some(collider_indices) = payload.collider_indices.as_deref() else {
+                    return false;
+                };
+                collider_faces_from_indices(collider_vertices, collider_indices)
+            };
             let mut shape_data = Dictionary::<StringName, Variant>::new();
             shape_data.set("faces", &collider_faces.to_variant());
             shape_data.set("backface_collision", false);
@@ -680,20 +748,28 @@ impl PlanetRuntime {
     }
 
     pub(crate) fn horizon_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {
-        let camera_distance = camera.position_planet.length();
-        let occluder_radius = self.config.planet_radius + self.config.horizon_safety_margin;
-
-        if camera_distance <= occluder_radius {
-            return true;
-        }
-
-        let beta = (occluder_radius / camera_distance).clamp(-1.0, 1.0).acos();
+        let camera_distance = camera.position_planet.length().max(f64::EPSILON);
+        let occluder_radius = (self.config.planet_radius - self.config.height_amplitude).max(1.0);
+        let beta_camera = if camera_distance <= occluder_radius {
+            std::f64::consts::PI
+        } else {
+            (occluder_radius / camera_distance).clamp(-1.0, 1.0).acos()
+        };
+        let chunk_max_radius = meta.bounds.max_radius.max(occluder_radius);
+        let beta_chunk = if chunk_max_radius <= occluder_radius {
+            0.0
+        } else {
+            (occluder_radius / chunk_max_radius).clamp(-1.0, 1.0).acos()
+        };
+        let angular_slack = (self.config.horizon_safety_margin
+            / camera_distance.max(chunk_max_radius))
+        .clamp(0.0, std::f64::consts::FRAC_PI_2);
         let theta = camera
             .position_planet
             .normalize_or_zero()
             .angle_between(meta.bounds.center_planet.normalize_or_zero());
 
-        theta <= beta + f64::from(meta.metrics.angular_radius)
+        theta <= beta_camera + beta_chunk + f64::from(meta.metrics.angular_radius) + angular_slack
     }
 
     pub(crate) fn frustum_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {

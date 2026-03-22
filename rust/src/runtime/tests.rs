@@ -92,6 +92,16 @@ fn orbit_camera_state() -> CameraState {
     }
 }
 
+fn near_surface_camera_state() -> CameraState {
+    CameraState {
+        position_planet: DVec3::new(0.0, 0.0, 1_000.0),
+        forward_planet: DVec3::new(0.0, 0.0, -1.0),
+        frustum_planes: huge_test_frustum(),
+        projection_scale: 1_200.0,
+        origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
+    }
+}
+
 fn local_position_to_dvec3(position: [f32; 3]) -> DVec3 {
     DVec3::new(
         f64::from(position[0]),
@@ -666,6 +676,63 @@ fn ensure_chunk_meta_lazily_builds_phase6_bounds_and_surface_class() {
 }
 
 #[test]
+fn chunk_meta_tracks_chunk_local_height_extrema() {
+    let mut runtime = test_runtime();
+    let a = runtime
+        .ensure_chunk_meta(ChunkKey::new(Face::Px, 3, 0, 0))
+        .unwrap()
+        .clone();
+    let b = runtime
+        .ensure_chunk_meta(ChunkKey::new(Face::Px, 3, 7, 7))
+        .unwrap()
+        .clone();
+
+    assert!(a.bounds.min_height >= -(runtime.config.height_amplitude as f32));
+    assert!(a.bounds.max_height <= runtime.config.height_amplitude as f32);
+    assert!(
+        a.bounds.min_height != b.bounds.min_height || a.bounds.max_height != b.bounds.max_height
+    );
+}
+
+#[test]
+fn horizon_culling_keeps_emergent_chunks_without_global_disable() {
+    let runtime = test_runtime();
+    let camera = near_surface_camera_state();
+    let surface_class = sample_surface_class();
+    let emergent_meta = ChunkMeta::new(
+        sample_key(),
+        ChunkBounds::new(
+            DVec3::new(0.0, 0.574, 0.819),
+            40.0,
+            -10.0,
+            120.0,
+            990.0,
+            1_120.0,
+        ),
+        ChunkMetrics::new(1.0, 0.0, 0.03),
+        surface_class.clone(),
+    )
+    .unwrap();
+    let buried_meta = ChunkMeta::new(
+        sample_key(),
+        ChunkBounds::new(
+            DVec3::new(0.0, 0.574, 0.819),
+            40.0,
+            -120.0,
+            -120.0,
+            880.0,
+            880.0,
+        ),
+        ChunkMetrics::new(1.0, 0.0, 0.03),
+        surface_class,
+    )
+    .unwrap();
+
+    assert!(runtime.horizon_visible(&camera, &emergent_meta));
+    assert!(!runtime.horizon_visible(&camera, &buried_meta));
+}
+
+#[test]
 fn selector_normalizes_neighbor_lod_delta_to_one() {
     let mut runtime = test_runtime();
     let camera = orbit_camera_state();
@@ -712,8 +779,43 @@ fn budgeted_selector_defers_work_when_frame_budget_is_tight() {
 }
 
 #[test]
+fn per_kind_commit_budgets_cap_render_and_physics_spikes() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            commit_budget_per_frame: 16,
+            upload_budget_bytes_per_frame: usize::MAX,
+            render_activation_budget_per_frame: 1,
+            render_update_budget_per_frame: 0,
+            physics_activation_budget_per_frame: 0,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera = orbit_camera_state();
+
+    runtime.step_visibility_selection(&camera).unwrap();
+
+    assert_eq!(runtime.active_render_count(), 1);
+    assert_eq!(runtime.active_physics_count(), 0);
+    assert!(runtime.deferred_commit_count() > 0);
+}
+
+#[test]
 fn physics_active_set_stays_separate_from_render_set() {
-    let mut runtime = test_runtime();
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            physics_activation_radius: 10_000.0,
+            physics_max_active_chunks: 4,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
     let camera = orbit_camera_state();
 
     for _ in 0..8 {
@@ -730,6 +832,38 @@ fn physics_active_set_stays_separate_from_render_set() {
         .active_physics
         .iter()
         .all(|key| runtime.active_render.contains(key)));
+}
+
+#[test]
+fn physics_selection_respects_active_chunk_cap() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            physics_activation_radius: 10_000.0,
+            physics_max_active_chunks: 3,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera = orbit_camera_state();
+    let desired_render = [
+        ChunkKey::new(Face::Px, 2, 0, 0),
+        ChunkKey::new(Face::Px, 2, 1, 0),
+        ChunkKey::new(Face::Px, 2, 0, 1),
+        ChunkKey::new(Face::Px, 2, 1, 1),
+        ChunkKey::new(Face::Pz, 2, 1, 1),
+    ]
+    .into_iter()
+    .collect::<HashSet<_>>();
+
+    let physics = runtime
+        .select_physics_set(&camera, &desired_render)
+        .unwrap();
+
+    assert_eq!(physics.len(), 3);
+    assert!(physics.iter().all(|key| desired_render.contains(key)));
 }
 
 #[test]

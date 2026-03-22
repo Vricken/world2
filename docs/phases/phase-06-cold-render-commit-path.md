@@ -15,10 +15,10 @@ Implemented on 2026-03-21 in:
 What shipped:
 
 - A real runtime selector that runs in the required stage order: horizon -> frustum -> projected-error LOD -> neighbor normalization -> render/physics set diffing -> budgeted commit application.
-- Conservative chunk metadata generation for bounds, min/max radius, angular radius, geometric error, and default surface class.
+- Conservative chunk metadata generation for bounds, sampled per-chunk min/max height/radius, angular radius, geometric error, and default surface class.
 - Split/merge hysteresis using `8 px` split and `4 px` merge thresholds.
-- Separate desired and committed render/physics active sets with per-frame deferred-work metrics.
-- Commit-budget and upload-budget enforcement with starvation tracking for deferred work.
+- Separate desired and committed render/physics active sets with near-camera physics caps and per-frame deferred-work metrics.
+- Commit-budget and upload-budget enforcement with per-kind throttles and starvation tracking for deferred work.
 - `PlanetRoot` camera-driven runtime ticks and headless debug logging so the selector can be validated with the local Godot binary.
 
 ## Documentation Checked Before Implementation
@@ -57,8 +57,8 @@ Runtime LOD is a cheap selector over cached metadata, and selection order is fix
 Per selected or cached chunk, runtime now has:
 
 - bounding sphere
-- min/max height
-- min/max radius
+- sampled min/max height
+- sampled min/max radius
 - conservative angular radius
 - geometric error
 - same-LOD neighbor data
@@ -71,11 +71,13 @@ Frustum culling alone is not enough for globe-scale visibility. Horizon culling 
 Current test:
 
 - `d = |camera_pos_from_planet_center|`
-- `beta = acos((planet_radius + safety_margin) / d)` when the camera is outside the occluder sphere
+- `R_occ = planet_radius - height_amplitude`
+- `beta_camera = acos(R_occ / d)` when the camera is outside the guaranteed-low occluder shell
+- `beta_chunk = acos(R_occ / chunk_max_radius)` when sampled chunk peaks rise above that shell
 - `theta = angle(camera_dir_from_center, chunk_bound_center_dir)`
-- keep if `theta <= beta + chunk_angular_radius`
+- keep if `theta <= beta_camera + beta_chunk + chunk_angular_radius + angular_slack`
 
-If the camera is inside the occluder radius, horizon culling falls back to keeping the chunk.
+There is no near-surface hard disable anymore. The runtime keeps using the sampled chunk radial interval so tall chunks can emerge over the horizon without forcing every chunk visible.
 
 ## Frustum Culling
 
@@ -101,14 +103,14 @@ Hysteresis rules:
 - split at `> 8 px`
 - remain split until `< 4 px`
 
-The runtime determines "currently split" from committed active descendants, which keeps visible set churn down while budgets catch up.
+The runtime determines "currently split" from a cached set of active split ancestors instead of scanning all active descendants for every chunk.
 
 ## Physics Residency
 
 Render and physics residency are independent:
 
 - render: horizon/frustum/error driven
-- physics: near-camera subset of the desired render set using `COLLISION_LOD_RADIUS_M = 3000.0`
+- physics: near-camera subset of the desired render set using `physics_activation_radius = 512.0` and `physics_max_active_chunks = 12`
 
 This phase keeps physics conservative and budget-aware without equating it to full render visibility.
 
@@ -116,9 +118,10 @@ This phase keeps physics conservative and budget-aware without equating it to fu
 
 After desired-set diffing:
 
-- cap logical commit work per frame with `COMMIT_BUDGET_PER_FRAME = 1024`
-- cap logical upload work per frame with `UPLOAD_BUDGET_BYTES_PER_FRAME = 64 MiB`
-- prioritize render activation first, then physics activation, then deactivation work
+- cap logical commit work per frame with `COMMIT_BUDGET_PER_FRAME = 24`
+- cap logical upload work per frame with `UPLOAD_BUDGET_BYTES_PER_FRAME = 1 MiB`
+- cap per-kind work with `render_activation_budget = 6`, `render_update_budget = 4`, `render_deactivation_budget = 8`, `physics_activation_budget = 2`, and `physics_deactivation_budget = 4`
+- prioritize render activation first, then render update, then physics activation, then deactivation work
 - defer overflow and track starvation depth in `SelectionFrameState`
 
 Because render/physics server object creation lands in later phases, this phase applies the budgets to active-set commitment and byte estimates rather than real `RenderingServer` uploads.
@@ -126,8 +129,8 @@ Because render/physics server object creation lands in later phases, this phase 
 ## Deviation Notes
 
 - The original phase wording implied precomputing metadata for every chunk through `MAX_LOD = 10`. In the current implementation, metadata is built lazily on first touch and cached. This keeps the selector deterministic while avoiding a startup-time `HashMap` allocation on the order of millions of entries for unused far-future chunks.
-- Physics residency currently uses the active camera as the near-player proxy. The default scene now supplies that camera through the fly controller rig.
-- The maintenance pass before Phase 11 raised the default commit budget from `24` to `1024` and the upload budget from `8 MiB` to `64 MiB` so free-fly camera movement can activate chunk churn more aggressively without leaving chunk-sized holes during transition frames.
+- Physics residency still uses the active camera as the near-player proxy. The current maintenance pass sharply narrowed that bubble and added a hard active-chunk cap so close-to-surface traversal no longer activates most selected chunks for collision.
+- The 2026-03-22 maintenance pass reversed the earlier permissive defaults, restoring explicit back-pressure so visibility spikes turn into bounded streaming instead of `100 ms+` single-frame stalls.
 - Full in-editor orbit stress testing is still a follow-up. This phase records the shipped headless validation plus unit-test coverage for selector behavior and budgeting.
 
 ## Checklist
@@ -166,12 +169,12 @@ Because render/physics server object creation lands in later phases, this phase 
 - [x] Budget controls are enforced every frame.
 - [x] Metrics exist for queued/committed/deferred operations.
 
-## Test Record (Fill In)
+## Test Record
 
-- [x] Date: 2026-03-21
-- [x] Result summary: `cargo test` passed with 25/25 tests, `./scripts/build_rust.sh` built successfully, and `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and reported `desired_render=5`, `active_render=5`, `desired_physics=1`, `active_physics=1`, `horizon=5`, and `frustum=5` from the default debug camera.
-- [x] Budget behavior notes: the tight-budget unit test confirms overflow work is deferred, `deferred_upload_bytes` is non-zero when the upload budget is undersized, and starvation counters increment while work remains queued.
-- [x] Follow-up actions: connect these logical commit/upload budgets to the real server-side mesh and physics commit path in Phases 07 and 08, then add a scripted fly-path stress pass to exercise warm reuse repeatedly.
+- [x] Date: 2026-03-22
+- [x] Result summary: `cargo test` passed with `42/42` tests, `./scripts/build_rust.sh` built successfully, `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and reported `desired_render=5`, `active_render=5`, `desired_physics=0`, `active_physics=0`, `horizon=5`, and `frustum=5` from the default debug camera, and `./scripts/run_godot.sh --headless -s /tmp/world2_deep_profile.gd` held the close-surface radius-`80` repro to `avg_frame_ms=6.84`, `p95_frame_ms=7.34`, and `max_frame_ms=8.47`.
+- [x] Budget behavior notes: the tight-budget and per-kind budget unit tests confirm overflow work is deferred, render/physics activation spikes are capped independently, and starvation counters increment while work remains queued.
+- [x] Follow-up actions: re-profile a real fly-through with camera translation near the surface, then decide whether a dedicated coarse-physics LOD path is still worth the extra complexity.
 
 ## References
 

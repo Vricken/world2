@@ -1,5 +1,7 @@
 use super::super::*;
 
+const METADATA_SAMPLE_GRID_EDGE: u32 = 5;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SelectionFrameState {
     pub tick: u64,
@@ -71,14 +73,17 @@ impl PlanetRuntime {
     }
 
     pub(crate) fn build_chunk_meta(&self, key: ChunkKey) -> Result<ChunkMeta, TopologyError> {
-        let sample_dirs = self.chunk_sample_directions(key)?;
+        let sample_dirs = self.chunk_sample_directions(key, METADATA_SAMPLE_GRID_EDGE)?;
         let center_dir = sample_dirs
             .iter()
             .copied()
             .fold(DVec3::ZERO, |sum, dir| sum + dir)
             .normalize_or_zero();
-        let min_radius = self.config.planet_radius - self.config.height_amplitude;
-        let max_radius = self.config.planet_radius + self.config.height_amplitude;
+        let terrain = TerrainFieldSettings {
+            planet_radius: self.config.planet_radius,
+            height_amplitude: self.config.height_amplitude,
+            ..TerrainFieldSettings::default()
+        };
         let center_planet = center_dir * self.config.planet_radius;
 
         let angular_radius = sample_dirs
@@ -86,6 +91,25 @@ impl PlanetRuntime {
             .copied()
             .map(|dir| center_dir.angle_between(dir))
             .fold(0.0_f64, f64::max);
+        let mut min_height = self.config.height_amplitude as f32;
+        let mut max_height = -(self.config.height_amplitude as f32);
+
+        for dir in &sample_dirs {
+            let height = terrain
+                .sample_height(*dir)
+                .clamp(-self.config.height_amplitude, self.config.height_amplitude)
+                as f32;
+            min_height = min_height.min(height);
+            max_height = max_height.max(height);
+        }
+        let raw_max_radius = self.config.planet_radius + f64::from(max_height);
+        let geometric_error = (2.0 * raw_max_radius * angular_radius
+            / f64::from(mesh_topology::QUADS_PER_EDGE)) as f32;
+        let height_padding = geometric_error.min(self.config.height_amplitude as f32);
+        min_height = (min_height - height_padding).max(-(self.config.height_amplitude as f32));
+        max_height = (max_height + height_padding).min(self.config.height_amplitude as f32);
+        let min_radius = (self.config.planet_radius + f64::from(min_height)).max(1.0);
+        let max_radius = self.config.planet_radius + f64::from(max_height);
         let radius = sample_dirs
             .iter()
             .copied()
@@ -96,8 +120,6 @@ impl PlanetRuntime {
                 ]
             })
             .fold(0.0_f64, f64::max);
-        let geometric_error =
-            (2.0 * max_radius * angular_radius / f64::from(mesh_topology::QUADS_PER_EDGE)) as f32;
         let surface_class = SurfaceClassKey::canonical_chunk(
             mesh_topology::BASE_STITCH_MASK,
             self.config.render_material_class,
@@ -113,8 +135,8 @@ impl PlanetRuntime {
             ChunkBounds::new(
                 center_planet,
                 radius,
-                -(self.config.height_amplitude as f32),
-                self.config.height_amplitude as f32,
+                min_height,
+                max_height,
                 min_radius,
                 max_radius,
             ),
@@ -123,30 +145,28 @@ impl PlanetRuntime {
         )
     }
 
-    fn chunk_sample_directions(&self, key: ChunkKey) -> Result<[DVec3; 9], TopologyError> {
+    fn chunk_sample_directions(
+        &self,
+        key: ChunkKey,
+        samples_per_edge: u32,
+    ) -> Result<Vec<DVec3>, TopologyError> {
         if !key.is_valid_for_lod() {
             return Err(TopologyError::InvalidChunkKey);
         }
 
-        let sample_uvs = [
-            (0.0, 0.0),
-            (0.5, 0.0),
-            (1.0, 0.0),
-            (0.0, 0.5),
-            (0.5, 0.5),
-            (1.0, 0.5),
-            (0.0, 1.0),
-            (0.5, 1.0),
-            (1.0, 1.0),
-        ];
-        let mut sample_dirs = [DVec3::ZERO; 9];
+        let mut sample_dirs = Vec::with_capacity((samples_per_edge * samples_per_edge) as usize);
+        let last = samples_per_edge.saturating_sub(1).max(1);
 
-        for (index, (u, v)) in sample_uvs.into_iter().enumerate() {
-            let face_uv = chunk_uv_to_face_uv(key, glam::DVec2::new(u, v))
-                .map_err(|_| TopologyError::InvalidChunkKey)?;
-            let face_st = face_uv_to_signed_coords(face_uv);
-            let cube_point = cube_point_for_face(key.face, face_st);
-            sample_dirs[index] = CubeProjection::Spherified.project_cube_point(cube_point);
+        for y in 0..samples_per_edge {
+            for x in 0..samples_per_edge {
+                let u = f64::from(x) / f64::from(last);
+                let v = f64::from(y) / f64::from(last);
+                let face_uv = chunk_uv_to_face_uv(key, glam::DVec2::new(u, v))
+                    .map_err(|_| TopologyError::InvalidChunkKey)?;
+                let face_st = face_uv_to_signed_coords(face_uv);
+                let cube_point = cube_point_for_face(key.face, face_st);
+                sample_dirs.push(CubeProjection::Spherified.project_cube_point(cube_point));
+            }
         }
 
         Ok(sample_dirs)
@@ -372,12 +392,14 @@ impl PlanetRuntime {
         frame_state: &mut SelectionFrameState,
     ) -> Result<HashSet<ChunkKey>, TopologyError> {
         let mut selected = HashSet::new();
+        let split_ancestors = self.build_current_split_ancestors();
 
         for face in Face::ALL {
             self.select_render_chunk(
                 ChunkKey::new(face, 0, 0, 0),
                 camera,
                 &mut selected,
+                &split_ancestors,
                 frame_state,
             )?;
         }
@@ -393,6 +415,7 @@ impl PlanetRuntime {
         key: ChunkKey,
         camera: &CameraState,
         selected: &mut HashSet<ChunkKey>,
+        split_ancestors: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
     ) -> Result<(), TopologyError> {
         let meta = self.ensure_chunk_meta(key)?.clone();
@@ -408,14 +431,15 @@ impl PlanetRuntime {
         frame_state.frustum_survivor_count += 1;
 
         let error_px = self.projected_error_px(camera, &meta);
-        let should_split = key.lod < self.config.max_lod && self.should_split_chunk(key, error_px);
+        let should_split = key.lod < self.config.max_lod
+            && self.should_split_chunk(key, error_px, split_ancestors);
 
         if should_split {
             for child in key
                 .children()
                 .expect("child keys must exist while below configured max lod")
             {
-                self.select_render_chunk(child, camera, selected, frame_state)?;
+                self.select_render_chunk(child, camera, selected, split_ancestors, frame_state)?;
             }
         } else {
             selected.insert(key);
@@ -424,11 +448,27 @@ impl PlanetRuntime {
         Ok(())
     }
 
-    fn should_split_chunk(&self, key: ChunkKey, error_px: f32) -> bool {
-        let is_currently_split = self
-            .active_render
-            .iter()
-            .any(|active| active != &key && active.is_descendant_of(&key));
+    fn build_current_split_ancestors(&self) -> HashSet<ChunkKey> {
+        let mut split_ancestors = HashSet::new();
+
+        for key in &self.active_render {
+            let mut ancestor = key.parent();
+            while let Some(parent) = ancestor {
+                split_ancestors.insert(parent);
+                ancestor = parent.parent();
+            }
+        }
+
+        split_ancestors
+    }
+
+    fn should_split_chunk(
+        &self,
+        key: ChunkKey,
+        error_px: f32,
+        split_ancestors: &HashSet<ChunkKey>,
+    ) -> bool {
+        let is_currently_split = split_ancestors.contains(&key);
 
         if is_currently_split {
             error_px >= self.config.merge_threshold_px
@@ -497,7 +537,7 @@ impl PlanetRuntime {
         }
     }
 
-    fn select_physics_set(
+    pub(crate) fn select_physics_set(
         &mut self,
         camera: &CameraState,
         desired_render: &HashSet<ChunkKey>,
@@ -514,7 +554,9 @@ impl PlanetRuntime {
 
         let mut physics = HashSet::new();
         for (key, distance) in candidates {
-            if distance <= self.config.physics_activation_radius {
+            if distance <= self.config.physics_activation_radius
+                && physics.len() < self.config.physics_max_active_chunks
+            {
                 physics.insert(key);
             }
         }

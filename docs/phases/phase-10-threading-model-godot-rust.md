@@ -98,7 +98,7 @@ Keep one origin policy across subsystems. Do not let render, physics, culling, a
 ## Test Record (Fill In)
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed `35/35`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and logged `origin_mode=shared_camera_relative`, `large_world_coordinates=false`, `origin_recenter_distance=1024`, `origin_rebases=1`, `render_rebinds=0`, `physics_rebinds=0`, `worker_jobs=5`, `render_cold_commits=5`, and `physics_commits=1`.
+- [x] Result summary: `cargo test` passed `42/42`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and logged `origin_mode=shared_camera_relative`, `large_world_coordinates=false`, `origin_recenter_distance=1024`, `origin_rebases=1`, `render_rebinds=0`, `physics_rebinds=0`, `worker_jobs=5`, `render_cold_commits=5`, and `physics_commits=0`.
 - [x] Origin policy mode: Shared camera-relative origin shifting with chunk-local `f32` buffers and `f64` chunk anchors.
 - [x] Follow-up actions: Phase 11 can now assume one shared precision/origin contract for seam validation, warm-path compatibility, and future asset placement.
 
