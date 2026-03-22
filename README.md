@@ -1,6 +1,6 @@
 # world2
 
-Phase 12 asset-placement hardening for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 13 default-number and back-pressure hardening for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -29,6 +29,7 @@ Phase 12 asset-placement hardening for a Godot + Rust (godot-rust/gdext) planet 
 - Phase 11 seam diagnostics in `rust/src/runtime/data.rs`, `rust/src/runtime/core.rs`, and `rust/src/lib.rs`, including active and pooled stitch-mask summaries, stitched-edge counters, pending seam-mismatch detection, and headless/loggable inspection hooks on `PlanetRoot`.
 - Phase 12 deterministic asset placement in `rust/src/runtime/assets.rs`, `rust/src/runtime/pipeline/selection.rs`, and `rust/src/runtime/workers/payloads.rs`, including `(planet_seed, chunk_key, cell_id, family_id)` placement hashes, terrain-projected reject filters for biome/slope/curvature/altitude/procedural-mask/exclusion radius, and chunk-owned accepted transforms stored directly in `ChunkPayload.assets`.
 - Phase 12 compact asset residency in `rust/src/runtime/pipeline/commit.rs` and `rust/src/lib.rs`, including `RenderingServer` multimeshes grouped by `(face, lod, 2x2 chunk batch, asset family)`, per-group custom AABBs, shared family mesh RIDs, origin-shift rebind support, and headless counters for active asset groups/instances.
+- Phase 13 runtime default controls in `rust/src/runtime.rs`, `rust/src/runtime/data.rs`, `rust/src/runtime/pipeline/commit.rs`, and `rust/src/runtime/tests.rs`, including explicit commit/upload budgets, per-kind activation caps, `payload_precompute_max_lod = 5`, a conservative `physics_pool_watermark = 4` below the render per-class watermark, and regression coverage for the documented starting values.
 - Fly debug controller in `scripts/player/fly_controller.gd` and `scenes/main.tscn`, with WASD + Space/Shift flight, mouse look, and Up/Down speed scaling over the default spawn outside the planet.
 - Launch and build scripts in `scripts/`.
 

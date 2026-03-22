@@ -76,13 +76,14 @@ Phase 08 now executes the Phase 07 lifecycle commands instead of only recording 
 Current defaults encoded in `RuntimeConfig`:
 
 - `render_pool_watermark_per_class = 8`
-- `physics_pool_watermark = 32`
+- `physics_pool_watermark = 4`
 
 Behavior:
 
 - render pools are keyed by full `SurfaceClassKey`
 - pooled render entries keep their Godot-owned staging buffers
 - pooled entries above watermark are freed instead of retained
+- physics pooling stays more conservative than render pooling after the Phase 13 default-number pass
 - prepared-but-uncommitted payloads now explicitly return any reserved pooled render entry if they are replaced or evicted
 
 ## Deviation Notes

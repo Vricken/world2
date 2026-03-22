@@ -260,6 +260,56 @@ fn payload_precompute_window_stays_bounded() {
 }
 
 #[test]
+fn phase13_default_runtime_config_matches_documented_starting_values() {
+    let config = RuntimeConfig::default();
+    let runtime = PlanetRuntime::new(config.clone(), Rid::Invalid, Rid::Invalid);
+
+    assert_eq!(config.max_lod, topology::DEFAULT_MAX_LOD);
+    assert_eq!(config.payload_precompute_max_lod, PAYLOAD_PRECOMPUTE_MAX_LOD);
+    assert_eq!(config.split_threshold_px, DEFAULT_SPLIT_THRESHOLD_PX);
+    assert_eq!(config.merge_threshold_px, DEFAULT_MERGE_THRESHOLD_PX);
+    assert_eq!(config.horizon_safety_margin, DEFAULT_HORIZON_SAFETY_MARGIN);
+    assert_eq!(config.physics_activation_radius, DEFAULT_PHYSICS_ACTIVATION_RADIUS);
+    assert_eq!(
+        config.physics_max_active_chunks,
+        DEFAULT_PHYSICS_MAX_ACTIVE_CHUNKS
+    );
+    assert_eq!(config.commit_budget_per_frame, DEFAULT_COMMIT_BUDGET_PER_FRAME);
+    assert_eq!(
+        config.upload_budget_bytes_per_frame,
+        DEFAULT_UPLOAD_BUDGET_BYTES_PER_FRAME
+    );
+    assert_eq!(
+        config.render_activation_budget_per_frame,
+        DEFAULT_RENDER_ACTIVATION_BUDGET_PER_FRAME
+    );
+    assert_eq!(
+        config.render_update_budget_per_frame,
+        DEFAULT_RENDER_UPDATE_BUDGET_PER_FRAME
+    );
+    assert_eq!(
+        config.render_deactivation_budget_per_frame,
+        DEFAULT_RENDER_DEACTIVATION_BUDGET_PER_FRAME
+    );
+    assert_eq!(
+        config.physics_activation_budget_per_frame,
+        DEFAULT_PHYSICS_ACTIVATION_BUDGET_PER_FRAME
+    );
+    assert_eq!(
+        config.physics_deactivation_budget_per_frame,
+        DEFAULT_PHYSICS_DEACTIVATION_BUDGET_PER_FRAME
+    );
+    assert_eq!(
+        config.render_pool_watermark_per_class,
+        DEFAULT_RENDER_POOL_WATERMARK_PER_CLASS
+    );
+    assert_eq!(config.physics_pool_watermark, DEFAULT_PHYSICS_POOL_WATERMARK);
+    assert!(config.physics_pool_watermark < config.render_pool_watermark_per_class);
+    assert!((1..=DEFAULT_MAX_WORKER_THREADS).contains(&config.worker_thread_count));
+    assert_eq!(runtime.worker_thread_count(), config.worker_thread_count);
+}
+
+#[test]
 fn metadata_precompute_window_is_explicit_in_runtime_config() {
     let runtime = PlanetRuntime::new(
         RuntimeConfig {

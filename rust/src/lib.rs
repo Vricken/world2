@@ -42,7 +42,7 @@ impl INode3D for PlanetRoot {
         let assets = self.runtime.asset_debug_snapshot();
 
         godot_print!(
-            "PlanetRoot ready. Phase 12 runtime active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={}",
+            "PlanetRoot ready. Phase 13 runtime active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={}",
             self.has_cached_world_rids(),
             self.runtime.origin_mode_label(),
             self.runtime.config.use_large_world_coordinates,
@@ -82,14 +82,14 @@ impl INode3D for PlanetRoot {
         let Some(camera_state) = self.acquire_camera_state() else {
             if self.runtime_tick_count == 1 {
                 godot_warn!(
-                    "PlanetRoot could not find an active Camera3D; skipping Phase 12 runtime tick."
+                    "PlanetRoot could not find an active Camera3D; skipping Phase 13 runtime tick."
                 );
             }
             return;
         };
 
         if let Err(err) = self.runtime.step_visibility_selection(&camera_state) {
-            godot_error!("PlanetRoot Phase 12 runtime tick failed: {err:?}");
+            godot_error!("PlanetRoot Phase 13 runtime tick failed: {err:?}");
             return;
         }
 
@@ -98,7 +98,7 @@ impl INode3D for PlanetRoot {
             let seam = self.runtime.seam_debug_snapshot();
             let assets = self.runtime.asset_debug_snapshot();
             godot_print!(
-                "PlanetRoot phase12 tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_jobs={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={}",
+                "PlanetRoot phase13 tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_jobs={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={}",
                 frame.tick,
                 self.runtime.meta_count(),
                 self.runtime.resident_payload_count(),
