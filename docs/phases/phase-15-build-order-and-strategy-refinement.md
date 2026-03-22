@@ -4,6 +4,10 @@
 
 Restore full strategy-layer refinement detail, including projection/visibility/backend/staging abstractions and final architecture shape.
 
+## Continuity From Phases 01-14
+
+Phase 15 does not replace the systems built in phases 01-14. It formalizes strategy seams so those systems remain testable and swappable without rewriting runtime ownership contracts.
+
 ## Projection Strategy (Keep Swappable)
 
 ```rust
@@ -90,7 +94,7 @@ This gives similar flexibility on buffer architecture as projection strategy giv
 
 ## Final Caveat
 
-Server-driven chunks + pooling + tighter FFI boundary are the right architecture for large planet rendering, but visibility discipline remains the dominant performance lever. Horizon culling, active-set control, collision residency, bounded commit churn, and bounded upload churn still matter more than any single low-level API trick.
+Server-driven chunks plus pooling plus tighter FFI boundary are the right architecture for large planet rendering, but visibility discipline remains the dominant performance lever. Horizon culling, active-set control, collision residency, bounded commit churn, and bounded upload churn still matter more than any single low-level API trick.
 
 ## Checklist
 
@@ -100,6 +104,28 @@ Server-driven chunks + pooling + tighter FFI boundary are the right architecture
 - [ ] Keep staging policy explicit and class-compatible.
 - [ ] Keep no-undocumented-zero-copy rule explicit in architecture docs.
 - [ ] Validate final architecture checklist against real implementation.
+
+## Prerequisites
+
+- [ ] Phase 14 build-order continuity completed.
+
+## Validation and Test Gates
+
+- [ ] Strategy seams can be exercised independently in tests.
+- [ ] Default strategy stack preserves current runtime behavior.
+- [ ] Architecture checklist matches implemented ownership/FFI rules.
+
+## Definition of Done
+
+- [ ] Strategy-layer boundaries are documented and enforceable.
+- [ ] Final architecture shape is fully represented in local docs.
+
+## Test Record (Fill In)
+
+- [ ] Date:
+- [ ] Result summary:
+- [ ] Strategies validated:
+- [ ] Follow-up actions:
 
 ## References
 

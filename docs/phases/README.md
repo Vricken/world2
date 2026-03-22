@@ -76,13 +76,45 @@ When in doubt, choose behavior explicitly documented by Godot and godot-rust, th
 - [x] [Phase 06 - Visibility Selection and LOD](phase-06-cold-render-commit-path.md)
 - [x] [Phase 07 - Mesh Generation Pipeline](phase-07-warm-pools-and-ffi-staging-path.md)
 - [x] [Phase 08 - Server-Side Render and Collision Commit Pattern](phase-08-physics-and-asset-streaming.md)
-- [ ] [Phase 09 - Threading Model in godot-rust](phase-09-threading-precision-final-hardening.md)
+- [x] [Phase 09 - Threading Model in godot-rust](phase-09-threading-precision-final-hardening.md)
 - [ ] [Phase 10 - Precision Strategy](phase-10-threading-model-godot-rust.md)
 - [ ] [Phase 11 - Seam Handling Rules](phase-11-precision-and-origin-strategy.md)
 - [ ] [Phase 12 - Asset Placement](phase-12-seam-handling-rules.md)
 - [ ] [Phase 13 - Default Numbers I Would Start With](phase-13-asset-placement.md)
 - [ ] [Phase 14 - Build Order](phase-14-default-numbers-and-tuning.md)
 - [ ] [Phase 15 - One Important Refinement](phase-15-build-order-and-strategy-refinement.md)
+
+## Big Plan Coverage Map
+
+This is the authoritative one-to-one mapping from `bigplan.md` sections to phase files:
+
+1. Recommended Project Shape -> Phase 01
+2. Data Model -> Phase 02
+3. Face Basis and Chunk-Local Coordinates -> Phase 03
+4. Chunk Keys and Deterministic Neighbor Mapping Across Faces -> Phase 04
+5. Visible Grid, Border Ring, and Stitch Variants -> Phase 05
+6. Visibility Selection and LOD -> Phase 06
+7. Mesh Generation Pipeline -> Phase 07
+8. Server-Side Render and Collision Commit Pattern -> Phase 08
+9. Threading Model in godot-rust -> Phase 09
+10. Precision Strategy -> Phase 10
+11. Seam Handling Rules -> Phase 11
+12. Asset Placement -> Phase 12
+13. Default Numbers I Would Start With -> Phase 13
+14. Build Order -> Phase 14
+15. One Important Refinement -> Phase 15
+
+## Continuity Contract Across Author Groups
+
+Phases 11-15 must continue naturally from phases 01-10 by preserving these dependencies:
+
+- Phase 11 hardens seam behavior using Phase 03 coordinate rules, Phase 05 stitch topology, and Phase 08 warm-path compatibility checks.
+- Phase 12 adds deterministic asset residency on top of Phase 06 active-set selection and Phase 08 server ownership.
+- Phase 13 sets initial runtime controls for budgets, pool watermarks, and tuning boundaries defined by phases 06-12.
+- Phase 14 records the end-to-end dependency order and the handoff from completed to pending work.
+- Phase 15 formalizes strategy seams without breaking ownership and FFI contracts already established in phases 01-14.
+
+Any future edits to phases 11-15 that break these continuity rules must be documented as explicit deviations.
 
 ### Filename Mapping Note
 

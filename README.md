@@ -1,6 +1,6 @@
 # world2
 
-Phase 08 server-side render and collision commit path for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 09 worker/commit threading hardening for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -21,6 +21,8 @@ Phase 08 server-side render and collision commit path for a Godot + Rust (godot-
 - Phase 08 server-side render commit path in `rust/src/runtime.rs`, including cold `RenderingServer` mesh/instance creation, warm vertex/attribute/index region updates, transform/scenario rebinding on pooled activation, strict surface-class compatibility checks, and per-class render pool watermarks.
 - Phase 08 conservative collision commit path in `rust/src/runtime.rs`, including `PhysicsServer3D` static-body residency, concave shape refresh for near-camera chunks, bounded physics pooling, and explicit RID teardown on shutdown.
 - Phase 08 runtime logging in `rust/src/lib.rs`, including per-frame cold/warm commit counts, fallback-reason counters, and render/physics pool occupancy for headless validation.
+- Phase 09 threaded render payload generation in `rust/src/runtime.rs`, including persistent Rust worker threads, deterministic request/result ordering, single-lane commit ownership, reusable per-worker scratch buffers for sampling/mesh/packing work, and explicit queue/wait/allocation-style metrics.
+- Phase 09 runtime logging in `rust/src/lib.rs`, including worker-thread counts, queued job peaks, worker wait counts, scratch reuse hits, and scratch growth events in the headless validation output.
 - Headless debug scene tuning in `scenes/main.tscn`, placing the default camera outside the planet so horizon/frustum selection can be validated without editor interaction.
 - Launch and build scripts in `scripts/`.
 

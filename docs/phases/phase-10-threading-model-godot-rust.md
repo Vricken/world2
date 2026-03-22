@@ -2,7 +2,11 @@
 
 ## Goal
 
-Restore complete precision/origin strategy detail, including `f64` authority, render-relative transforms, and pooled-entry transform rebinding rules.
+Restore complete precision and origin strategy detail, including `f64` authority, explicit conversion boundaries, render/physics-relative transforms, and pooled-entry transform rebinding rules.
+
+## Continuity From Phases 01-09
+
+Phases 01-09 establish deterministic chunk identity, visibility selection, warm/cold commit behavior, and the worker/commit ownership contract. Phase 10 must keep those contracts stable while formalizing one precision policy across render, physics, and culling.
 
 ## Precision Rules
 
@@ -43,7 +47,7 @@ Keep one origin policy across subsystems. Do not let render, physics, culling, a
 
 ## Prerequisites
 
-- [ ] Phase 09 threading and commit ownership model completed.
+- [x] Phase 09 threading and commit ownership model completed.
 
 ## Ordered Build Steps
 
@@ -74,3 +78,4 @@ Keep one origin policy across subsystems. Do not let render, physics, culling, a
 ## References
 
 - [Large world coordinates - Godot docs](https://docs.godotengine.org/en/stable/tutorials/physics/large_world_coordinates.html)
+- [Optimizing 3D performance - Godot docs](https://docs.godotengine.org/en/latest/tutorials/performance/optimizing_3d_performance.html)

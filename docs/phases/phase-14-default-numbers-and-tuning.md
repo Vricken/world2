@@ -42,6 +42,17 @@ This order validates hard geometry/math early, then backend correctness, then op
 
 That separation is intentional. Correctness-first systems must exist before optimization complexity is added.
 
+## Natural Handoff From Phases 01-10 Into 11-15
+
+- Phases 01-10 cover build-order steps 1-20.
+- Phase 11 hardens seam correctness over steps 5, 8, and 19.
+- Phase 12 introduces chunk-group asset residency for step 21.
+- Phase 09 threading plus worker-scratch policy handles step 22.
+- Phase 13 default numbers and back-pressure controls harden step 23.
+- Phase 15 adds strategy-layer refinement across all steps without changing ownership contracts.
+
+This is the intended continuity path between the two author groups.
+
 ## Checklist
 
 - [ ] Follow the sequence unless a hard dependency blocks progress.
@@ -49,6 +60,21 @@ That separation is intentional. Correctness-first systems must exist before opti
 - [ ] Verify each stage before moving to next.
 - [ ] Keep cold path working before warm-path optimization.
 - [ ] Keep budget controls as explicit final hardening stage.
+
+## Prerequisites
+
+- [ ] Phase 13 default-number policy completed.
+
+## Validation and Test Gates
+
+- [ ] Sequencing dependencies are respected in implementation plans.
+- [ ] Any out-of-order work includes a documented dependency reason.
+- [ ] Handoff from completed to pending steps is explicit in tracking notes.
+
+## Definition of Done
+
+- [ ] Build order and dependency policy are explicit and enforceable.
+- [ ] The handoff from phases 01-10 to phases 11-15 is documented and unambiguous.
 
 ## References
 

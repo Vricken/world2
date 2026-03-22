@@ -39,10 +39,11 @@ impl INode3D for PlanetRoot {
         self.cache_world_rids();
 
         godot_print!(
-            "PlanetRoot ready. Phase 08 runtime active. chunks_in_scene_tree=false cached_world_rids={} meta_precompute_max_lod={} payload_precompute_max_lod={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={}",
+            "PlanetRoot ready. Phase 09 runtime active. chunks_in_scene_tree=false cached_world_rids={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={}",
             self.has_cached_world_rids(),
             self.runtime.metadata_precompute_max_lod(),
             self.runtime.payload_precompute_max_lod(),
+            self.runtime.worker_thread_count(),
             self.runtime.meta_count(),
             DIRECTED_EDGE_TRANSFORM_COUNT,
             DEFAULT_MAX_LOD,
@@ -68,21 +69,21 @@ impl INode3D for PlanetRoot {
         let Some(camera_state) = self.acquire_camera_state() else {
             if self.runtime_tick_count == 1 {
                 godot_warn!(
-                    "PlanetRoot could not find an active Camera3D; skipping Phase 08 runtime tick."
+                    "PlanetRoot could not find an active Camera3D; skipping Phase 09 runtime tick."
                 );
             }
             return;
         };
 
         if let Err(err) = self.runtime.step_visibility_selection(&camera_state) {
-            godot_error!("PlanetRoot Phase 08 runtime tick failed: {err:?}");
+            godot_error!("PlanetRoot Phase 09 runtime tick failed: {err:?}");
             return;
         }
 
         if self.runtime_tick_count == 1 || self.runtime_tick_count % 120 == 0 {
             let frame = self.runtime.frame_state();
             godot_print!(
-                "PlanetRoot phase08 tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} render_pool_entries={} physics_pool_entries={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={}",
+                "PlanetRoot phase09 tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_jobs={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} render_pool_entries={} physics_pool_entries={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={}",
                 frame.tick,
                 self.runtime.meta_count(),
                 self.runtime.resident_payload_count(),
@@ -108,6 +109,14 @@ impl INode3D for PlanetRoot {
                 frame.phase8_fallback_missing_current_surface_class,
                 frame.phase8_fallback_incompatible_current_surface_class,
                 frame.phase8_fallback_no_compatible_pooled_surface,
+                frame.phase9_worker_threads,
+                frame.phase9_generation_jobs,
+                frame.phase9_queue_peak,
+                frame.phase9_result_wait_count,
+                frame.phase9_sample_scratch_reuse_hits,
+                frame.phase9_mesh_scratch_reuse_hits,
+                frame.phase9_pack_scratch_reuse_hits,
+                frame.phase9_scratch_growth_events,
                 frame.render_pool_entries,
                 frame.physics_pool_entries,
                 frame.queued_commit_ops,
