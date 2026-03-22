@@ -5,8 +5,8 @@ use std::thread::{self, JoinHandle};
 use glam::{DVec2, DVec3};
 use godot::builtin::{
     Array, Color, Dictionary, PackedByteArray, PackedColorArray, PackedInt32Array,
-    PackedVector2Array, PackedVector3Array, Plane, Rid, StringName, Transform3D, Variant,
-    Vector2, Vector3,
+    PackedVector2Array, PackedVector3Array, Plane, Rid, StringName, Transform3D, Variant, Vector2,
+    Vector3,
 };
 use godot::classes::physics_server_3d::{BodyMode, BodyState};
 use godot::classes::rendering_server::PrimitiveType;
@@ -28,6 +28,7 @@ pub const PAYLOAD_PRECOMPUTE_MAX_LOD: u8 = 5;
 pub const DEFAULT_SPLIT_THRESHOLD_PX: f32 = 8.0;
 pub const DEFAULT_MERGE_THRESHOLD_PX: f32 = 4.0;
 pub const DEFAULT_PHYSICS_ACTIVATION_RADIUS: f64 = 3_000.0;
+pub const DEFAULT_ORIGIN_RECENTER_DISTANCE: f64 = 1_024.0;
 pub const DEFAULT_COMMIT_BUDGET_PER_FRAME: usize = 24;
 pub const DEFAULT_UPLOAD_BUDGET_BYTES_PER_FRAME: usize = 8 * 1024 * 1024;
 pub const DEFAULT_RENDER_MATERIAL_CLASS: u8 = 0;
@@ -504,6 +505,46 @@ pub struct AssetInstance {
     pub color_seed: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginPolicyMode {
+    SharedCameraRelative,
+    EngineLargeWorld,
+}
+
+impl OriginPolicyMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SharedCameraRelative => "shared_camera_relative",
+            Self::EngineLargeWorld => "engine_large_world",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OriginSnapshot {
+    pub mode: OriginPolicyMode,
+    pub render_origin_planet: DVec3,
+    pub physics_origin_planet: DVec3,
+}
+
+impl OriginSnapshot {
+    pub fn for_config(config: &RuntimeConfig, camera_position_planet: DVec3) -> Self {
+        if config.use_large_world_coordinates {
+            Self {
+                mode: OriginPolicyMode::EngineLargeWorld,
+                render_origin_planet: DVec3::ZERO,
+                physics_origin_planet: DVec3::ZERO,
+            }
+        } else {
+            Self {
+                mode: OriginPolicyMode::SharedCameraRelative,
+                render_origin_planet: camera_position_planet,
+                physics_origin_planet: camera_position_planet,
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RenderLifecycleCommand {
     WarmReuseCurrent,
@@ -516,6 +557,7 @@ pub struct ChunkPayload {
     pub surface_class: SurfaceClassKey,
     pub stitch_mask: u8,
     pub sample_count: usize,
+    pub chunk_origin_planet: DVec3,
     pub mesh: CpuMeshBuffers,
     pub packed_regions: Option<PackedMeshRegions>,
     pub gd_staging: Option<GdPackedStaging>,
@@ -523,7 +565,6 @@ pub struct ChunkPayload {
     pub assets: Vec<AssetInstance>,
     pub collider_vertices: Option<Vec<[f32; 3]>>,
     pub collider_indices: Option<Vec<i32>>,
-    pub render_transform: Transform3D,
     pub render_lifecycle: RenderLifecycleCommand,
 }
 
@@ -543,6 +584,7 @@ impl Default for ChunkPayload {
             surface_class,
             stitch_mask: mesh_topology::BASE_STITCH_MASK,
             sample_count: 0,
+            chunk_origin_planet: DVec3::ZERO,
             mesh: CpuMeshBuffers::default(),
             packed_regions: None,
             gd_staging: None,
@@ -550,7 +592,6 @@ impl Default for ChunkPayload {
             assets: Vec::new(),
             collider_vertices: None,
             collider_indices: None,
-            render_transform: Transform3D::IDENTITY,
             render_lifecycle: RenderLifecycleCommand::ColdCreate(
                 RenderFallbackReason::MissingCurrentSurfaceClass,
             ),
@@ -625,6 +666,8 @@ pub struct RuntimeConfig {
     pub payload_precompute_max_lod: u8,
     pub worker_thread_count: usize,
     pub enable_godot_staging: bool,
+    pub use_large_world_coordinates: bool,
+    pub origin_recenter_distance: f64,
     pub planet_radius: f64,
     pub height_amplitude: f64,
     pub split_threshold_px: f32,
@@ -655,6 +698,8 @@ impl Default for RuntimeConfig {
             payload_precompute_max_lod: PAYLOAD_PRECOMPUTE_MAX_LOD,
             worker_thread_count,
             enable_godot_staging: true,
+            use_large_world_coordinates: false,
+            origin_recenter_distance: DEFAULT_ORIGIN_RECENTER_DISTANCE,
             planet_radius: terrain.planet_radius,
             height_amplitude: terrain.height_amplitude,
             split_threshold_px: DEFAULT_SPLIT_THRESHOLD_PX,
@@ -680,6 +725,7 @@ pub struct CameraState {
     pub forward_planet: DVec3,
     pub frustum_planes: [Plane; 6],
     pub projection_scale: f64,
+    pub origin: OriginSnapshot,
 }
 
 impl CameraState {
@@ -688,8 +734,9 @@ impl CameraState {
         frustum_planes: [Plane; 6],
         fov_y_degrees: f32,
         viewport_height_px: f32,
+        origin: OriginSnapshot,
     ) -> Self {
-        let position_planet = vector3_to_dvec3(transform.origin);
+        let position_planet = vector3_to_dvec3(transform.origin) + origin.render_origin_planet;
         let forward_planet = -vector3_to_dvec3(transform.basis.col_c()).normalize_or_zero();
         let half_fov_radians = f64::from(fov_y_degrees).to_radians() * 0.5;
         let projection_scale =
@@ -700,6 +747,7 @@ impl CameraState {
             forward_planet,
             frustum_planes,
             projection_scale,
+            origin,
         }
     }
 }
@@ -739,6 +787,7 @@ struct RenderPayloadRequest {
     sequence: usize,
     key: ChunkKey,
     surface_class: SurfaceClassKey,
+    chunk_origin_planet: DVec3,
     config: RuntimeConfig,
 }
 
@@ -756,6 +805,7 @@ struct PreparedRenderPayload {
     key: ChunkKey,
     surface_class: SurfaceClassKey,
     sample_count: usize,
+    chunk_origin_planet: DVec3,
     mesh: CpuMeshBuffers,
     packed_regions: PackedMeshRegions,
     scratch_metrics: WorkerScratchJobMetrics,
@@ -781,7 +831,8 @@ impl WorkerScratch {
     fn prepare_samples(&mut self, required: usize) -> (bool, usize) {
         let reused = self.samples.capacity() >= required;
         if !reused {
-            self.samples.reserve(required.saturating_sub(self.samples.capacity()));
+            self.samples
+                .reserve(required.saturating_sub(self.samples.capacity()));
         }
         self.samples.clear();
         (reused, usize::from(!reused))
@@ -1058,6 +1109,7 @@ fn build_render_payload_with_scratch(
         &scratch.samples,
         samples_per_edge,
         request.surface_class.stitch_mask,
+        request.chunk_origin_planet,
         &mut scratch.mesh,
     );
 
@@ -1080,6 +1132,7 @@ fn build_render_payload_with_scratch(
         key: request.key,
         surface_class: request.surface_class.clone(),
         sample_count,
+        chunk_origin_planet: request.chunk_origin_planet,
         mesh: scratch.mesh.clone(),
         packed_regions: PackedMeshRegions {
             vertex_region: scratch.vertex_region.clone(),
@@ -1121,8 +1174,8 @@ fn sample_chunk_scalar_field_into(
             let face_uv =
                 chunk_uv_to_face_uv(key, chunk_uv).expect("phase 9 worker keys must be valid");
             let cube_point = cube_point_for_face(key.face, face_uv_to_signed_coords(face_uv));
-            let unit_dir =
-                CubeProjection::Spherified.project_cube_point(normalize_to_cube_surface(cube_point));
+            let unit_dir = CubeProjection::Spherified
+                .project_cube_point(normalize_to_cube_surface(cube_point));
             let height = terrain
                 .sample_height(unit_dir)
                 .clamp(-config.height_amplitude, config.height_amplitude)
@@ -1151,7 +1204,10 @@ fn fill_sample_slope_hints_for(
     samples_per_edge: u32,
     height_amplitude: f64,
 ) {
-    let heights = samples.iter().map(|sample| sample.height).collect::<Vec<_>>();
+    let heights = samples
+        .iter()
+        .map(|sample| sample.height)
+        .collect::<Vec<_>>();
 
     for y in 0..samples_per_edge {
         for x in 0..samples_per_edge {
@@ -1159,12 +1215,10 @@ fn fill_sample_slope_hints_for(
                 + y * samples_per_edge) as usize];
             let right = heights[(clamp_grid_index(x as i32 + 1, samples_per_edge) as u32
                 + y * samples_per_edge) as usize];
-            let down = heights[(x
-                + clamp_grid_index(y as i32 - 1, samples_per_edge) as u32 * samples_per_edge)
-                as usize];
-            let up = heights[(x
-                + clamp_grid_index(y as i32 + 1, samples_per_edge) as u32 * samples_per_edge)
-                as usize];
+            let down = heights[(x + clamp_grid_index(y as i32 - 1, samples_per_edge) as u32
+                * samples_per_edge) as usize];
+            let up = heights[(x + clamp_grid_index(y as i32 + 1, samples_per_edge) as u32
+                * samples_per_edge) as usize];
             let gradient = ((right - left).powi(2) + (up - down).powi(2)).sqrt();
             let slope_hint = if height_amplitude <= f64::from(f32::EPSILON) {
                 0.0
@@ -1182,6 +1236,7 @@ fn derive_cpu_mesh_buffers_into(
     samples: &[ChunkSample],
     samples_per_edge: u32,
     stitch_mask: u8,
+    chunk_origin_planet: DVec3,
     mesh: &mut CpuMeshBuffers,
 ) {
     let topology = mesh_topology::canonical_chunk_topology();
@@ -1210,7 +1265,8 @@ fn derive_cpu_mesh_buffers_into(
             let tangent_v = (up - down).normalize_or_zero();
             let normal = tangent_u.cross(tangent_v).normalize_or_zero();
 
-            mesh.positions.push(dvec3_to_f32_array(displaced));
+            mesh.positions
+                .push(planet_to_chunk_local_f32(displaced, chunk_origin_planet));
             mesh.normals.push(dvec3_to_f32_array(normal));
             mesh.tangents.push([
                 tangent_u.x as f32,
@@ -1228,12 +1284,7 @@ fn derive_cpu_mesh_buffers_into(
     }
 }
 
-fn sample_grid_get(
-    samples: &[ChunkSample],
-    samples_per_edge: u32,
-    x: u32,
-    y: u32,
-) -> &ChunkSample {
+fn sample_grid_get(samples: &[ChunkSample], samples_per_edge: u32, x: u32, y: u32) -> &ChunkSample {
     &samples[(y * samples_per_edge + x) as usize]
 }
 
@@ -1265,8 +1316,8 @@ fn pack_mesh_regions_into(
         );
         if surface_class.attribute_stride >= PACKED_COLOR_OFFSET + PACKED_COLOR_BYTES {
             write_rgba8(
-                &mut attribute_region
-                    [offset + PACKED_COLOR_OFFSET..offset + PACKED_COLOR_OFFSET + PACKED_COLOR_BYTES],
+                &mut attribute_region[offset + PACKED_COLOR_OFFSET
+                    ..offset + PACKED_COLOR_OFFSET + PACKED_COLOR_BYTES],
                 mesh.colors[index],
             );
         }
@@ -1318,6 +1369,9 @@ pub struct SelectionFrameState {
     pub phase9_mesh_scratch_reuse_hits: usize,
     pub phase9_pack_scratch_reuse_hits: usize,
     pub phase9_scratch_growth_events: usize,
+    pub phase10_origin_rebases: usize,
+    pub phase10_render_transform_rebinds: usize,
+    pub phase10_physics_transform_rebinds: usize,
     pub render_pool_entries: usize,
     pub physics_pool_entries: usize,
 }
@@ -1335,8 +1389,10 @@ pub struct PlanetRuntime {
     pub render_pool: HashMap<SurfaceClassKey, VecDeque<RenderPoolEntry>>,
     pub physics_pool: VecDeque<PhysicsPoolEntry>,
     threaded_payload_generator: ThreadedPayloadGenerator,
+    pub origin_snapshot: OriginSnapshot,
     pub frame_state: SelectionFrameState,
     pub deferred_starvation: HashMap<DeferredOpKey, u32>,
+    origin_shift_pending_rebind: bool,
 }
 
 impl Default for PlanetRuntime {
@@ -1349,6 +1405,7 @@ impl PlanetRuntime {
     pub fn new(config: RuntimeConfig, scenario_rid: Rid, physics_space_rid: Rid) -> Self {
         let mut runtime = Self {
             threaded_payload_generator: ThreadedPayloadGenerator::new(config.worker_thread_count),
+            origin_snapshot: OriginSnapshot::for_config(&config, DVec3::ZERO),
             config,
             scenario_rid,
             physics_space_rid,
@@ -1361,6 +1418,7 @@ impl PlanetRuntime {
             physics_pool: VecDeque::new(),
             frame_state: SelectionFrameState::default(),
             deferred_starvation: HashMap::new(),
+            origin_shift_pending_rebind: false,
         };
         runtime
             .build_metadata_tree_through_lod(
@@ -1383,6 +1441,43 @@ impl PlanetRuntime {
 
     pub fn worker_thread_count(&self) -> usize {
         self.threaded_payload_generator.worker_count()
+    }
+
+    pub fn origin_snapshot(&self) -> OriginSnapshot {
+        self.origin_snapshot
+    }
+
+    pub fn origin_mode_label(&self) -> &'static str {
+        self.origin_snapshot.mode.label()
+    }
+
+    pub fn root_scene_position(&self) -> Vector3 {
+        dvec3_to_vector3(-self.origin_snapshot.render_origin_planet)
+    }
+
+    pub fn camera_planet_position_from_render(&self, position_render: Vector3) -> DVec3 {
+        vector3_to_dvec3(position_render) + self.origin_snapshot.render_origin_planet
+    }
+
+    pub fn update_origin_from_camera(&mut self, camera_position_planet: DVec3) -> bool {
+        let desired = if self.config.use_large_world_coordinates {
+            OriginSnapshot::for_config(&self.config, DVec3::ZERO)
+        } else {
+            let current = self.origin_snapshot.render_origin_planet;
+            let delta = (camera_position_planet - current).length();
+            if delta < self.config.origin_recenter_distance {
+                return false;
+            }
+            OriginSnapshot::for_config(&self.config, camera_position_planet)
+        };
+
+        if desired == self.origin_snapshot {
+            return false;
+        }
+
+        self.origin_snapshot = desired;
+        self.origin_shift_pending_rebind = true;
+        true
     }
 
     pub fn should_precompute_payload_for_lod(&self, lod: u8) -> bool {
@@ -1444,6 +1539,11 @@ impl PlanetRuntime {
             phase9_worker_threads: self.threaded_payload_generator.worker_count(),
             ..SelectionFrameState::default()
         };
+        if self.origin_shift_pending_rebind {
+            frame_state.phase10_origin_rebases += 1;
+            self.rebind_active_relative_transforms(&mut frame_state);
+            self.origin_shift_pending_rebind = false;
+        }
         let desired_render = self.select_render_set(camera, &mut frame_state)?;
         let desired_physics = self.select_physics_set(camera, &desired_render)?;
 
@@ -1625,6 +1725,7 @@ impl PlanetRuntime {
         &self,
         samples: &ChunkSampleGrid,
         stitch_mask: u8,
+        chunk_origin_planet: DVec3,
     ) -> Result<CpuMeshBuffers, StitchError> {
         let topology = mesh_topology::canonical_chunk_topology();
         let visible_edge = mesh_topology::VISIBLE_VERTICES_PER_EDGE;
@@ -1659,7 +1760,8 @@ impl PlanetRuntime {
                 let tangent_v = (up - down).normalize_or_zero();
                 let normal = tangent_u.cross(tangent_v).normalize_or_zero();
 
-                mesh.positions.push(dvec3_to_f32_array(displaced));
+                mesh.positions
+                    .push(planet_to_chunk_local_f32(displaced, chunk_origin_planet));
                 mesh.normals.push(dvec3_to_f32_array(normal));
                 mesh.tangents.push([
                     tangent_u.x as f32,
@@ -1950,15 +2052,17 @@ impl PlanetRuntime {
         desired_render: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
     ) -> Result<usize, TopologyError> {
-        let Some(request) =
-            self.prepare_render_payload_request(0, key, desired_render)?
-        else {
+        let Some(request) = self.prepare_render_payload_request(0, key, desired_render)? else {
             return Ok(self.payload_upload_bytes(key));
         };
 
         let samples = self.sample_chunk_scalar_field(key)?;
         let mesh = self
-            .derive_cpu_mesh_buffers(&samples, request.surface_class.stitch_mask)
+            .derive_cpu_mesh_buffers(
+                &samples,
+                request.surface_class.stitch_mask,
+                request.chunk_origin_planet,
+            )
             .expect("normalized stitch masks must map to canonical topology");
         let packed_regions = self
             .pack_mesh_regions(&mesh, &request.surface_class)
@@ -1968,6 +2072,7 @@ impl PlanetRuntime {
             key,
             surface_class: request.surface_class,
             sample_count: samples.len(),
+            chunk_origin_planet: request.chunk_origin_planet,
             mesh,
             packed_regions,
             scratch_metrics: WorkerScratchJobMetrics::default(),
@@ -1997,6 +2102,7 @@ impl PlanetRuntime {
             sequence,
             key,
             surface_class,
+            chunk_origin_planet: self.ensure_chunk_meta(key)?.bounds.center_planet,
             config: self.config.clone(),
         }))
     }
@@ -2049,6 +2155,7 @@ impl PlanetRuntime {
             key,
             surface_class,
             sample_count,
+            chunk_origin_planet,
             mesh,
             packed_regions,
             ..
@@ -2061,7 +2168,11 @@ impl PlanetRuntime {
         let current_surface_class = self
             .rid_state
             .get(&key)
-            .and_then(|state| state.render_resident.then(|| state.active_surface_class.clone()))
+            .and_then(|state| {
+                state
+                    .render_resident
+                    .then(|| state.active_surface_class.clone())
+            })
             .flatten();
         let warm_path =
             self.choose_render_warm_path(current_surface_class.as_ref(), &surface_class);
@@ -2112,6 +2223,7 @@ impl PlanetRuntime {
             surface_class: surface_class.clone(),
             stitch_mask: surface_class.stitch_mask,
             sample_count,
+            chunk_origin_planet,
             mesh,
             packed_regions: Some(packed_regions),
             gd_staging: staging,
@@ -2122,7 +2234,6 @@ impl PlanetRuntime {
             assets: Vec::new(),
             collider_vertices: None,
             collider_indices: None,
-            render_transform: Transform3D::IDENTITY,
             render_lifecycle,
         };
         if let Some(previous_payload) = self.resident_payloads.insert(key, payload) {
@@ -2404,23 +2515,28 @@ impl PlanetRuntime {
         };
 
         let surface_class = payload.surface_class.clone();
-        let render_transform = payload.render_transform;
+        let chunk_origin_planet = payload.chunk_origin_planet;
         let render_lifecycle = payload.render_lifecycle.clone();
         let mesh = payload.mesh.clone();
         let packed_regions = payload.packed_regions.clone();
         let mut gd_staging = payload.gd_staging.take();
         let pooled_render_entry = payload.pooled_render_entry.take();
 
+        let render_transform = self.render_transform_for_chunk(chunk_origin_planet);
+
         if self.should_commit_to_servers() {
             let mut rendering_server = RenderingServer::singleton();
             match render_lifecycle {
                 RenderLifecycleCommand::WarmReuseCurrent => {
-                    let Some((mesh_rid, render_instance_rid)) = self.current_render_rids(key) else {
+                    let Some((mesh_rid, render_instance_rid)) = self.current_render_rids(key)
+                    else {
                         return;
                     };
-                    let Some(staging) =
-                        self.ensure_commit_staging(gd_staging.take(), packed_regions.as_ref(), &surface_class)
-                    else {
+                    let Some(staging) = self.ensure_commit_staging(
+                        gd_staging.take(),
+                        packed_regions.as_ref(),
+                        &surface_class,
+                    ) else {
                         return;
                     };
 
@@ -2458,9 +2574,11 @@ impl PlanetRuntime {
                         self.recycle_render_entry(previous_entry);
                     }
 
-                    let Some(staging) =
-                        self.ensure_commit_staging(gd_staging.take().or(entry.gd_staging), packed_regions.as_ref(), &surface_class)
-                    else {
+                    let Some(staging) = self.ensure_commit_staging(
+                        gd_staging.take().or(entry.gd_staging),
+                        packed_regions.as_ref(),
+                        &surface_class,
+                    ) else {
                         return;
                     };
 
@@ -2483,8 +2601,10 @@ impl PlanetRuntime {
                         &staging.index_region,
                     );
                     rendering_server.instance_set_base(entry.render_instance_rid, entry.mesh_rid);
-                    rendering_server.instance_set_scenario(entry.render_instance_rid, self.scenario_rid);
-                    rendering_server.instance_set_transform(entry.render_instance_rid, render_transform);
+                    rendering_server
+                        .instance_set_scenario(entry.render_instance_rid, self.scenario_rid);
+                    rendering_server
+                        .instance_set_transform(entry.render_instance_rid, render_transform);
                     rendering_server.instance_set_visible(entry.render_instance_rid, true);
 
                     self.install_render_entry(
@@ -2515,8 +2635,11 @@ impl PlanetRuntime {
                     rendering_server.instance_set_transform(render_instance_rid, render_transform);
                     rendering_server.instance_set_visible(render_instance_rid, true);
 
-                    let staging =
-                        self.ensure_commit_staging(gd_staging.take(), packed_regions.as_ref(), &surface_class);
+                    let staging = self.ensure_commit_staging(
+                        gd_staging.take(),
+                        packed_regions.as_ref(),
+                        &surface_class,
+                    );
                     self.install_render_entry(
                         key,
                         mesh_rid,
@@ -2578,7 +2701,7 @@ impl PlanetRuntime {
         let Some(collider_indices) = payload.collider_indices.clone() else {
             return;
         };
-        let render_transform = payload.render_transform;
+        let physics_transform = self.physics_transform_for_chunk(payload.chunk_origin_planet);
 
         let pooled_entry = self.pop_physics_pool_entry();
         let (physics_body_rid, physics_shape_rid) = match pooled_entry {
@@ -2608,7 +2731,7 @@ impl PlanetRuntime {
             physics_server.body_set_state(
                 physics_body_rid,
                 BodyState::TRANSFORM,
-                &render_transform.to_variant(),
+                &physics_transform.to_variant(),
             );
             physics_server.body_set_space(physics_body_rid, self.physics_space_rid);
         }
@@ -2759,7 +2882,8 @@ impl PlanetRuntime {
         packed_regions: Option<&PackedMeshRegions>,
         surface_class: &SurfaceClassKey,
     ) -> Option<GdPackedStaging> {
-        let mut staging = staging.unwrap_or_else(|| GdPackedStaging::new_for_surface_class(surface_class));
+        let mut staging =
+            staging.unwrap_or_else(|| GdPackedStaging::new_for_surface_class(surface_class));
         if let Some(packed_regions) = packed_regions {
             staging
                 .copy_from_regions(packed_regions, surface_class)
@@ -2792,7 +2916,8 @@ impl PlanetRuntime {
     }
 
     fn frustum_visible(&self, camera: &CameraState, meta: &ChunkMeta) -> bool {
-        let center = dvec3_to_vector3(meta.bounds.center_planet);
+        let center =
+            dvec3_to_vector3(meta.bounds.center_planet - camera.origin.render_origin_planet);
         let radius = meta.bounds.radius as f32;
 
         camera
@@ -2811,6 +2936,86 @@ impl PlanetRuntime {
 
     fn chunk_camera_distance(&self, camera: &CameraState, meta: &ChunkMeta) -> f64 {
         (meta.bounds.center_planet - camera.position_planet).length()
+    }
+
+    fn chunk_origin_planet_for_key(&self, key: ChunkKey) -> Option<DVec3> {
+        self.resident_payloads
+            .get(&key)
+            .map(|payload| payload.chunk_origin_planet)
+            .or_else(|| self.meta.get(&key).map(|meta| meta.bounds.center_planet))
+    }
+
+    fn render_transform_for_chunk(&self, chunk_origin_planet: DVec3) -> Transform3D {
+        relative_transform(
+            chunk_origin_planet,
+            self.origin_snapshot.render_origin_planet,
+        )
+    }
+
+    fn physics_transform_for_chunk(&self, chunk_origin_planet: DVec3) -> Transform3D {
+        relative_transform(
+            chunk_origin_planet,
+            self.origin_snapshot.physics_origin_planet,
+        )
+    }
+
+    fn rebind_active_relative_transforms(&mut self, frame_state: &mut SelectionFrameState) {
+        let render_keys = self.active_render.iter().copied().collect::<Vec<_>>();
+        let physics_keys = self.active_physics.iter().copied().collect::<Vec<_>>();
+
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            for key in &render_keys {
+                let Some(render_instance_rid) = self
+                    .rid_state
+                    .get(key)
+                    .and_then(|state| state.render_instance_rid)
+                else {
+                    continue;
+                };
+                let Some(chunk_origin_planet) = self.chunk_origin_planet_for_key(*key) else {
+                    continue;
+                };
+                rendering_server.instance_set_transform(
+                    render_instance_rid,
+                    self.render_transform_for_chunk(chunk_origin_planet),
+                );
+                frame_state.phase10_render_transform_rebinds += 1;
+            }
+
+            let mut physics_server = PhysicsServer3D::singleton();
+            for key in &physics_keys {
+                let Some(physics_body_rid) = self
+                    .rid_state
+                    .get(key)
+                    .and_then(|state| state.physics_body_rid)
+                else {
+                    continue;
+                };
+                let Some(chunk_origin_planet) = self.chunk_origin_planet_for_key(*key) else {
+                    continue;
+                };
+                physics_server.body_set_state(
+                    physics_body_rid,
+                    BodyState::TRANSFORM,
+                    &self
+                        .physics_transform_for_chunk(chunk_origin_planet)
+                        .to_variant(),
+                );
+                frame_state.phase10_physics_transform_rebinds += 1;
+            }
+        } else {
+            for key in render_keys {
+                if self.chunk_origin_planet_for_key(key).is_some() {
+                    frame_state.phase10_render_transform_rebinds += 1;
+                }
+            }
+            for key in physics_keys {
+                if self.chunk_origin_planet_for_key(key).is_some() {
+                    frame_state.phase10_physics_transform_rebinds += 1;
+                }
+            }
+        }
     }
 
     pub fn register_chunk_meta(
@@ -3066,6 +3271,14 @@ fn dvec3_to_f32_array(value: DVec3) -> [f32; 3] {
     [value.x as f32, value.y as f32, value.z as f32]
 }
 
+fn planet_to_chunk_local_f32(point_planet: DVec3, chunk_origin_planet: DVec3) -> [f32; 3] {
+    dvec3_to_f32_array(point_planet - chunk_origin_planet)
+}
+
+fn relative_transform(chunk_origin_planet: DVec3, origin_planet: DVec3) -> Transform3D {
+    Transform3D::IDENTITY.translated(dvec3_to_vector3(chunk_origin_planet - origin_planet))
+}
+
 fn normalize_to_cube_surface(cube_point: DVec3) -> DVec3 {
     let max_axis = cube_point.abs().max_element();
     if max_axis <= f64::EPSILON {
@@ -3117,9 +3330,12 @@ fn cpu_mesh_to_surface_arrays(mesh: &CpuMeshBuffers) -> Array<Variant> {
             .copied()
             .map(|normal| Vector3::new(normal[0], normal[1], normal[2])),
     );
-    let colors = PackedColorArray::from_iter(mesh.colors.iter().copied().map(|color| {
-        Color::from_rgba(color[0], color[1], color[2], color[3])
-    }));
+    let colors = PackedColorArray::from_iter(
+        mesh.colors
+            .iter()
+            .copied()
+            .map(|color| Color::from_rgba(color[0], color[1], color[2], color[3])),
+    );
     let uvs = PackedVector2Array::from_iter(
         mesh.uvs
             .iter()
@@ -3210,29 +3426,33 @@ mod tests {
     }
 
     fn huge_test_frustum() -> [Plane; 6] {
+        box_test_frustum(Vector3::ZERO, 20_000.0)
+    }
+
+    fn box_test_frustum(center: Vector3, half_extent: f32) -> [Plane; 6] {
         [
             Plane::from_point_normal(
-                Vector3::new(0.0, 0.0, 20_000.0),
+                center + Vector3::new(0.0, 0.0, half_extent),
                 Vector3::new(0.0, 0.0, 1.0),
             ),
             Plane::from_point_normal(
-                Vector3::new(0.0, 0.0, -20_000.0),
+                center + Vector3::new(0.0, 0.0, -half_extent),
                 Vector3::new(0.0, 0.0, -1.0),
             ),
             Plane::from_point_normal(
-                Vector3::new(-20_000.0, 0.0, 0.0),
+                center + Vector3::new(-half_extent, 0.0, 0.0),
                 Vector3::new(-1.0, 0.0, 0.0),
             ),
             Plane::from_point_normal(
-                Vector3::new(0.0, 20_000.0, 0.0),
+                center + Vector3::new(0.0, half_extent, 0.0),
                 Vector3::new(0.0, 1.0, 0.0),
             ),
             Plane::from_point_normal(
-                Vector3::new(20_000.0, 0.0, 0.0),
+                center + Vector3::new(half_extent, 0.0, 0.0),
                 Vector3::new(1.0, 0.0, 0.0),
             ),
             Plane::from_point_normal(
-                Vector3::new(0.0, -20_000.0, 0.0),
+                center + Vector3::new(0.0, -half_extent, 0.0),
                 Vector3::new(0.0, -1.0, 0.0),
             ),
         ]
@@ -3244,7 +3464,16 @@ mod tests {
             forward_planet: DVec3::new(0.0, 0.0, -1.0),
             frustum_planes: huge_test_frustum(),
             projection_scale: 1_200.0,
+            origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
         }
+    }
+
+    fn local_position_to_dvec3(position: [f32; 3]) -> DVec3 {
+        DVec3::new(
+            f64::from(position[0]),
+            f64::from(position[1]),
+            f64::from(position[2]),
+        )
     }
 
     #[test]
@@ -3429,6 +3658,90 @@ mod tests {
         assert_eq!(frame_state.phase7_packed_chunks, 1);
         assert_eq!(frame_state.phase7_staged_chunks, 0);
         assert_eq!(frame_state.phase7_commit_payloads, 1);
+    }
+
+    #[test]
+    fn phase10_payload_vertices_are_chunk_local_offsets() {
+        let mut runtime = test_runtime();
+        let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+        let desired_render = [key].into_iter().collect::<HashSet<_>>();
+        let mut frame_state = SelectionFrameState::default();
+
+        runtime
+            .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+            .unwrap();
+        let payload = runtime.resident_payloads.get(&key).unwrap();
+        let samples = runtime.sample_chunk_scalar_field(key).unwrap();
+        let visible_sample = samples.get(
+            mesh_topology::BORDER_RING_QUADS,
+            mesh_topology::BORDER_RING_QUADS,
+        );
+
+        let reconstructed =
+            payload.chunk_origin_planet + local_position_to_dvec3(payload.mesh.positions[0]);
+        let expected = visible_sample.displaced_point(runtime.config.planet_radius);
+
+        assert!(
+            (reconstructed - expected).length() < 1.0e-3,
+            "reconstructed={reconstructed:?} expected={expected:?}"
+        );
+        assert!(payload.chunk_origin_planet.length() > 0.0);
+    }
+
+    #[test]
+    fn phase10_origin_policy_keeps_render_and_physics_origins_in_lockstep() {
+        let mut runtime = test_runtime();
+        let camera_planet = DVec3::new(12_345.0, -678.0, 9_101.0);
+
+        assert!(runtime.update_origin_from_camera(camera_planet));
+        assert_eq!(
+            runtime.origin_snapshot.mode,
+            OriginPolicyMode::SharedCameraRelative
+        );
+        assert_eq!(runtime.origin_snapshot.render_origin_planet, camera_planet);
+        assert_eq!(runtime.origin_snapshot.physics_origin_planet, camera_planet);
+    }
+
+    #[test]
+    fn phase10_frustum_checks_use_render_relative_centers() {
+        let runtime = test_runtime();
+        let key = sample_key();
+        let surface_class = sample_surface_class();
+        let meta = ChunkMeta::new(
+            key,
+            ChunkBounds::new(
+                DVec3::new(50_000.0, 0.0, 0.0),
+                200.0,
+                -10.0,
+                10.0,
+                990.0,
+                1_010.0,
+            ),
+            ChunkMetrics::new(1.0, 0.0, 0.05),
+            surface_class,
+        )
+        .unwrap();
+
+        let unshifted = CameraState {
+            position_planet: DVec3::new(50_000.0, 0.0, 500.0),
+            forward_planet: DVec3::new(0.0, 0.0, -1.0),
+            frustum_planes: box_test_frustum(Vector3::ZERO, 1_000.0),
+            projection_scale: 1_200.0,
+            origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
+        };
+        let shifted = CameraState {
+            position_planet: DVec3::new(50_000.0, 0.0, 500.0),
+            forward_planet: DVec3::new(0.0, 0.0, -1.0),
+            frustum_planes: box_test_frustum(Vector3::ZERO, 1_000.0),
+            projection_scale: 1_200.0,
+            origin: OriginSnapshot::for_config(
+                &RuntimeConfig::default(),
+                DVec3::new(50_000.0, 0.0, 0.0),
+            ),
+        };
+
+        assert!(!runtime.frustum_visible(&unshifted, &meta));
+        assert!(runtime.frustum_visible(&shifted, &meta));
     }
 
     #[test]
@@ -3746,7 +4059,9 @@ mod tests {
         );
         assert_eq!(frame_state.phase8_render_warm_pool_commits, 1);
 
-        let pooled_previous = runtime.pop_render_pool_entry(&previous_surface_class).unwrap();
+        let pooled_previous = runtime
+            .pop_render_pool_entry(&previous_surface_class)
+            .unwrap();
         assert_eq!(pooled_previous.mesh_rid, previous_mesh_rid);
         assert_eq!(pooled_previous.render_instance_rid, previous_instance_rid);
     }

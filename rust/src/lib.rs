@@ -37,10 +37,14 @@ impl INode3D for PlanetRoot {
     fn ready(&mut self) {
         self.base_mut().set_process(true);
         self.cache_world_rids();
+        self.apply_runtime_origin_shift();
 
         godot_print!(
-            "PlanetRoot ready. Phase 09 runtime active. chunks_in_scene_tree=false cached_world_rids={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={}",
+            "PlanetRoot ready. Phase 10 runtime active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={}",
             self.has_cached_world_rids(),
+            self.runtime.origin_mode_label(),
+            self.runtime.config.use_large_world_coordinates,
+            self.runtime.config.origin_recenter_distance,
             self.runtime.metadata_precompute_max_lod(),
             self.runtime.payload_precompute_max_lod(),
             self.runtime.worker_thread_count(),
@@ -69,21 +73,21 @@ impl INode3D for PlanetRoot {
         let Some(camera_state) = self.acquire_camera_state() else {
             if self.runtime_tick_count == 1 {
                 godot_warn!(
-                    "PlanetRoot could not find an active Camera3D; skipping Phase 09 runtime tick."
+                    "PlanetRoot could not find an active Camera3D; skipping Phase 10 runtime tick."
                 );
             }
             return;
         };
 
         if let Err(err) = self.runtime.step_visibility_selection(&camera_state) {
-            godot_error!("PlanetRoot Phase 09 runtime tick failed: {err:?}");
+            godot_error!("PlanetRoot Phase 10 runtime tick failed: {err:?}");
             return;
         }
 
         if self.runtime_tick_count == 1 || self.runtime_tick_count % 120 == 0 {
             let frame = self.runtime.frame_state();
             godot_print!(
-                "PlanetRoot phase09 tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_jobs={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} render_pool_entries={} physics_pool_entries={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={}",
+                "PlanetRoot phase10 tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_jobs={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={}",
                 frame.tick,
                 self.runtime.meta_count(),
                 self.runtime.resident_payload_count(),
@@ -117,6 +121,10 @@ impl INode3D for PlanetRoot {
                 frame.phase9_mesh_scratch_reuse_hits,
                 frame.phase9_pack_scratch_reuse_hits,
                 frame.phase9_scratch_growth_events,
+                frame.phase10_origin_rebases,
+                frame.phase10_render_transform_rebinds,
+                frame.phase10_physics_transform_rebinds,
+                self.runtime.origin_mode_label(),
                 frame.render_pool_entries,
                 frame.physics_pool_entries,
                 frame.queued_commit_ops,
@@ -235,7 +243,26 @@ impl PlanetRoot {
         canonical_chunk_topology().base_indices().len() as i64
     }
 
-    fn acquire_camera_state(&self) -> Option<CameraState> {
+    fn acquire_camera_state(&mut self) -> Option<CameraState> {
+        let raw = self.acquire_raw_camera_state()?;
+        let camera_position_planet = self
+            .runtime
+            .camera_planet_position_from_render(raw.transform.origin);
+        self.runtime
+            .update_origin_from_camera(camera_position_planet);
+        self.apply_runtime_origin_shift();
+
+        let raw = self.acquire_raw_camera_state()?;
+        Some(CameraState::from_godot(
+            raw.transform,
+            raw.frustum_planes,
+            raw.fov_y_degrees,
+            raw.viewport_height_px,
+            self.runtime.origin_snapshot(),
+        ))
+    }
+
+    fn acquire_raw_camera_state(&self) -> Option<RawCameraState> {
         let viewport = self.base().get_viewport()?;
         let camera = viewport.get_camera_3d()?;
         let frustum = camera.get_frustum();
@@ -257,12 +284,12 @@ impl PlanetRoot {
         ];
         let visible_rect = viewport.get_visible_rect();
 
-        Some(CameraState::from_godot(
-            camera.get_camera_transform(),
+        Some(RawCameraState {
+            transform: camera.get_camera_transform(),
             frustum_planes,
-            camera.get_fov(),
-            visible_rect.size.y,
-        ))
+            fov_y_degrees: camera.get_fov(),
+            viewport_height_px: visible_rect.size.y,
+        })
     }
 
     fn cache_world_rids(&mut self) {
@@ -281,6 +308,18 @@ impl PlanetRoot {
         self.cached_physics_space_rid = Some(physics_space_rid);
         self.runtime.set_world_rids(scenario_rid, physics_space_rid);
     }
+
+    fn apply_runtime_origin_shift(&mut self) {
+        let root_position = self.runtime.root_scene_position();
+        self.base_mut().set_position(root_position);
+    }
+}
+
+struct RawCameraState {
+    transform: Transform3D,
+    frustum_planes: [Plane; 6],
+    fov_y_degrees: f32,
+    viewport_height_px: f32,
 }
 
 struct World2Extension;

@@ -77,7 +77,7 @@ When in doubt, choose behavior explicitly documented by Godot and godot-rust, th
 - [x] [Phase 07 - Mesh Generation Pipeline](phase-07-warm-pools-and-ffi-staging-path.md)
 - [x] [Phase 08 - Server-Side Render and Collision Commit Pattern](phase-08-physics-and-asset-streaming.md)
 - [x] [Phase 09 - Threading Model in godot-rust](phase-09-threading-precision-final-hardening.md)
-- [ ] [Phase 10 - Precision Strategy](phase-10-threading-model-godot-rust.md)
+- [x] [Phase 10 - Precision Strategy](phase-10-threading-model-godot-rust.md)
 - [ ] [Phase 11 - Seam Handling Rules](phase-11-precision-and-origin-strategy.md)
 - [ ] [Phase 12 - Asset Placement](phase-12-seam-handling-rules.md)
 - [ ] [Phase 13 - Default Numbers I Would Start With](phase-13-asset-placement.md)

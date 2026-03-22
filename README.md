@@ -1,6 +1,6 @@
 # world2
 
-Phase 09 worker/commit threading hardening for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 10 precision/origin hardening for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -23,6 +23,8 @@ Phase 09 worker/commit threading hardening for a Godot + Rust (godot-rust/gdext)
 - Phase 08 runtime logging in `rust/src/lib.rs`, including per-frame cold/warm commit counts, fallback-reason counters, and render/physics pool occupancy for headless validation.
 - Phase 09 threaded render payload generation in `rust/src/runtime.rs`, including persistent Rust worker threads, deterministic request/result ordering, single-lane commit ownership, reusable per-worker scratch buffers for sampling/mesh/packing work, and explicit queue/wait/allocation-style metrics.
 - Phase 09 runtime logging in `rust/src/lib.rs`, including worker-thread counts, queued job peaks, worker wait counts, scratch reuse hits, and scratch growth events in the headless validation output.
+- Phase 10 precision/origin policy in `rust/src/runtime.rs`, including `f64` chunk anchors as authority, chunk-local `f32` mesh/collider buffers, explicit render/physics transform conversion from a shared origin snapshot, thresholded camera-relative origin recentering, and active transform rebinds when the shared origin shifts.
+- Phase 10 scene-root rebasing in `rust/src/lib.rs`, including camera-state recovery from render-relative coordinates, root-node origin shifts for child gameplay nodes, and headless logging for origin rebases and transform rebind counts.
 - Headless debug scene tuning in `scenes/main.tscn`, placing the default camera outside the planet so horizon/frustum selection can be validated without editor interaction.
 - Launch and build scripts in `scripts/`.
 
