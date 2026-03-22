@@ -9,7 +9,7 @@ Restore full topology and stitch-class detail so this phase captures the full co
 Implemented on 2026-03-21 in:
 
 - `rust/src/mesh_topology.rs`
-- `rust/src/runtime.rs`
+- `rust/src/runtime/data.rs`
 - `rust/src/lib.rs`
 
 What shipped:

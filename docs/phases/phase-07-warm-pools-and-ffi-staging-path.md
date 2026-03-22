@@ -8,7 +8,8 @@ Ship the stage-by-stage mesh generation pipeline that sits between Phase 06 sele
 
 Implemented on 2026-03-21 in:
 
-- `rust/src/runtime.rs`
+- `rust/src/runtime/pipeline/selection.rs`
+- `rust/src/runtime/workers/payloads.rs`
 - `rust/src/lib.rs`
 
 What shipped:

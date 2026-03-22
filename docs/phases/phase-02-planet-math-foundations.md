@@ -178,7 +178,7 @@ For static planets, precompute all metadata for all LODs, but cap render-residen
 
 Implemented in:
 
-- `rust/src/runtime.rs`
+- `rust/src/runtime/data.rs`
 - `rust/src/lib.rs`
 
 What is now live in code:
@@ -237,7 +237,7 @@ Implementation boundary kept explicit:
 ## Test Record (Fill In)
 
 - [x] Date: 2026-03-21
-- [x] Result summary: Added `rust/src/runtime.rs` with the Phase 02 runtime data model, strict surface-class compatibility checks, reusable packed staging ownership, bounded payload residency helpers, and `PlanetRoot` runtime wiring/debug accessors in `rust/src/lib.rs`.
+- [x] Result summary: Added the Phase 02 runtime data model under `rust/src/runtime/data.rs`, with strict surface-class compatibility checks, reusable packed staging ownership, bounded payload residency helpers, and `PlanetRoot` runtime wiring/debug accessors in `rust/src/lib.rs`.
 - [x] Compatibility edge cases validated: `cargo test` passed 6 unit tests covering chunk-key LOD bounds, strict surface-class mismatch detection, packed-region byte validation, deterministic runtime ownership transitions, payload precompute-window bounds, and bounded payload residency under mock camera churn.
 - [x] Follow-up actions: Use the Phase 02 data model in Phase 03 face-basis and chunk-local-coordinate work, then fill `ChunkMeta`/neighbor data planet-wide once cross-face mapping rules are implemented.
 

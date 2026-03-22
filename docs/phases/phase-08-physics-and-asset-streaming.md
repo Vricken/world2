@@ -8,14 +8,14 @@ Restore the real server-side commit layer that Phase 07 prepared for: cold mesh 
 
 Implemented on 2026-03-21 in:
 
-- `rust/src/runtime.rs`
+- `rust/src/runtime/pipeline/commit.rs`
 - `rust/src/lib.rs`
 - `README.md`
 
 What shipped:
 
 - Real `RenderingServer` cold commits using `mesh_create()`, `mesh_add_surface_from_arrays()`, `instance_create()`, `instance_set_base()`, `instance_set_scenario()`, `instance_set_transform()`, and `instance_set_visible()`.
-- Real warm render commits using `mesh_surface_update_vertex_region()`, `mesh_surface_update_attribute_region()`, and `mesh_surface_update_index_region()` over reusable Godot-owned staging buffers.
+- Real warm render commits that reuse mesh/instance RIDs but refresh the surface with `mesh_clear()` + `mesh_add_surface_from_arrays()` on update.
 - Strict warm-path compatibility routing that keeps current-surface reuse, pooled-surface reuse, and cold fallback separate all the way into commit time.
 - Per-class render pool watermarks and bounded physics pool reuse with deterministic fallback to free instead of unbounded RID growth.
 - Conservative `PhysicsServer3D` collision activation for near-camera chunks using static bodies plus concave polygon shapes refreshed from prepared collider payloads.
@@ -40,6 +40,11 @@ Constraints carried into code:
 - Reused instances always refresh scenario and transform on activation.
 - Collision remains near-player scoped and correctness-first; render pooling stays more aggressive than physics pooling.
 
+Maintenance note on 2026-03-22:
+
+- Live camera motion exposed `buffer_update` overruns when the runtime attempted raw warm region writes against engine-managed surface buffers.
+- The shipped maintenance fix keeps RID reuse and strict compatibility checks, but refreshes the reused surface with `mesh_clear()` + `mesh_add_surface_from_arrays()` until a future pass implements format/offset-aware partial updates directly against Godot's documented buffer layout.
+
 ## Commit Model
 
 Phase 08 now executes the Phase 07 lifecycle commands instead of only recording them.
@@ -56,7 +61,7 @@ Phase 08 now executes the Phase 07 lifecycle commands instead of only recording 
 - Reuse the current mesh/instance when the committed surface class is still compatible.
 - Otherwise swap to a compatible pooled mesh/instance pair when one exists.
 - Push the previous committed pair back through the bounded render pool before replacing it.
-- Refresh vertex, attribute, and index regions from staged `PackedByteArray` buffers and rebind base/scenario/transform on activation.
+- Refresh the reused mesh surface from the CPU mesh arrays, then rebind base/scenario/transform on activation.
 
 ### Collision Path
 
@@ -82,7 +87,8 @@ Behavior:
 ## Deviation Notes
 
 - Stable docs were used first, but the local validation binary is `Godot 4.7.dev.custom_build.4ea6ff24e`. During live validation, concave server-shape data had to match the engine's `faces` dictionary contract exactly. That runtime behavior is now recorded here because the shipped headless binary enforced it.
-- Warm current-surface reuse is covered by unit tests and the live commit path, but the default headless scene is still mostly a cold-start validation because the debug camera is static. A moving-camera warm-stress pass remains a useful follow-up once the runtime gets explicit orbit/debug controls.
+- The original Phase 08 plan targeted raw `mesh_surface_update_*_region()` writes on warm refresh. The maintenance pass reverted that specific optimization after live movement exposed buffer-size mismatches against the engine-managed surface layout. Warm refresh still reuses RIDs and surface-class compatibility checks; only the byte-region mutation step was deferred.
+- Warm current-surface reuse is covered by unit tests and the live commit path, but the default headless scene is still mostly a cold-start validation because the fly controller does not move in headless runs by itself. A scripted moving-camera warm-stress pass remains a useful follow-up.
 
 ## Checklist
 

@@ -108,7 +108,7 @@ This graph is a core source of truth for stitching, neighbor LOD delta enforceme
 Implemented in:
 
 - `rust/src/topology.rs`
-- `rust/src/runtime.rs`
+- `rust/src/runtime/data.rs`
 - `rust/src/lib.rs`
 
 What is now live in code:

@@ -8,7 +8,7 @@ Restore the full runtime visibility/LOD selection narrative, including horizon-f
 
 Implemented on 2026-03-21 in:
 
-- `rust/src/runtime.rs`
+- `rust/src/runtime/pipeline/selection.rs`
 - `rust/src/lib.rs`
 - `scenes/main.tscn`
 
@@ -126,7 +126,7 @@ Because render/physics server object creation lands in later phases, this phase 
 ## Deviation Notes
 
 - The original phase wording implied precomputing metadata for every chunk through `MAX_LOD = 10`. In the current implementation, metadata is built lazily on first touch and cached. This keeps the selector deterministic while avoiding a startup-time `HashMap` allocation on the order of millions of entries for unused far-future chunks.
-- Physics residency currently uses the active camera as the near-player proxy because the gameplay/player system is not implemented yet.
+- Physics residency currently uses the active camera as the near-player proxy. The default scene now supplies that camera through the fly controller rig.
 - Full in-editor orbit stress testing is still a follow-up. This phase records the shipped headless validation plus unit-test coverage for selector behavior and budgeting.
 
 ## Checklist
@@ -170,7 +170,7 @@ Because render/physics server object creation lands in later phases, this phase 
 - [x] Date: 2026-03-21
 - [x] Result summary: `cargo test` passed with 25/25 tests, `./scripts/build_rust.sh` built successfully, and `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and reported `desired_render=5`, `active_render=5`, `desired_physics=1`, `active_physics=1`, `horizon=5`, and `frustum=5` from the default debug camera.
 - [x] Budget behavior notes: the tight-budget unit test confirms overflow work is deferred, `deferred_upload_bytes` is non-zero when the upload budget is undersized, and starvation counters increment while work remains queued.
-- [x] Follow-up actions: connect these logical commit/upload budgets to the real server-side mesh and physics commit path in Phases 07 and 08, and add an editor-driven orbit stress pass once camera controls exist.
+- [x] Follow-up actions: connect these logical commit/upload budgets to the real server-side mesh and physics commit path in Phases 07 and 08, then add a scripted fly-path stress pass to exercise warm reuse repeatedly.
 
 ## References
 

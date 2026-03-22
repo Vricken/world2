@@ -1,4 +1,6 @@
-[gd_scene format=3 uid="uid://b51qkys1eqfw8"]
+[gd_scene load_steps=5 format=3 uid="uid://b51qkys1eqfw8"]
+
+[ext_resource type="Script" path="res://scripts/player/fly_controller.gd" id="1_4plxw"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sgp6g"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -13,6 +15,10 @@ sky = SubResource("Sky_o5qli")
 tonemap_mode = 2
 glow_enabled = true
 
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_j3h7i"]
+radius = 0.4
+height = 1.6
+
 [node name="PlanetRoot" type="PlanetRoot" unique_id=1423041356]
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=5108196]
@@ -24,8 +30,16 @@ shadow_enabled = true
 
 [node name="DebugRoot" type="Node3D" parent="." unique_id=1042470957]
 
-[node name="CameraAnchor" type="Node3D" parent="." unique_id=1381682098]
+[node name="PlayerController" type="CharacterBody3D" parent="." unique_id=1381682098]
+script = ExtResource("1_4plxw")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3000)
 
-[node name="MainCamera" type="Camera3D" parent="CameraAnchor" unique_id=404168182]
+[node name="CollisionShape3D" type="CollisionShape3D" parent="PlayerController" unique_id=189540231]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
+shape = SubResource("CapsuleShape3D_j3h7i")
+
+[node name="PitchPivot" type="Node3D" parent="PlayerController" unique_id=99342051]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
+
+[node name="MainCamera" type="Camera3D" parent="PlayerController/PitchPivot" unique_id=404168182]
 current = true

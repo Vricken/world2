@@ -11,11 +11,14 @@ Use this scene layout:
 ```text
 PlanetRoot (Node3D / Rust GodotClass)
 |- DebugRoot (Node3D, optional)
-|- CameraAnchor / gameplay nodes
+|- PlayerController (CharacterBody3D fly rig)
+|  `- MainCamera / gameplay nodes
 `- No per-chunk terrain or collision nodes
 ```
 
 This remains the core structural decision. `PlanetRoot` is a thin shell used to own the Rust planet runtime, fetch `World3D`, cache the rendering scenario RID and physics space RID, drive the update loop, and expose debug/editor controls.
+
+The current default gameplay node is a fly controller rig under `PlanetRoot`, not a free-standing `CameraAnchor`. That still fits the phase contract because gameplay/debug nodes remain shell-only and chunk state still lives in server RIDs rather than scene children.
 
 Terrain chunks do not exist as `MeshInstance3D` or `StaticBody3D` nodes. Their visible state lives in `RenderingServer` resources and instance RIDs attached to a scenario, while their collision state lives in `PhysicsServer3D` body and shape RIDs attached to a physics space.
 
