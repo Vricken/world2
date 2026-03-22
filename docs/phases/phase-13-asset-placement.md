@@ -18,10 +18,12 @@ Implemented on 2026-03-22 in:
 What shipped:
 
 - Explicit Phase 13 default constants now anchor the runtime config for radius-derived LOD, payload precompute scope, split/merge hysteresis, horizon slack, physics activation radius, commit/upload budgets, and per-kind render/physics commit caps.
+- Runtime `max_lod` now respects a Project Settings-backed cap at `world2/runtime/max_lod_cap`, which defaults to `10` in-editor while the topology layer itself supports up to `16` for larger planets.
+- Metadata residency now defaults to prebuilding through the effective runtime `max_lod`, and the resident metadata set is stored in dense compact slabs rather than a `HashMap<ChunkKey, ChunkMeta>`.
 - Budgeted diff application already defers render and physics work when total commit count, upload bytes, or per-kind caps are exceeded, and starvation counters remain visible in `SelectionFrameState` and `PlanetRoot` logs.
 - Render and physics pool reuse remain bounded, with the default physics pool watermark tightened to `4` so collision pooling stays more conservative than the render per-class watermark of `8`.
 - Worker-thread startup remains clamped to a small bounded count, and Phase 13 regression coverage now checks that the documented starting values and worker-count alignment stay explicit in code.
-- Default runtime `max_lod` is now derived from `planet_radius` so the average finest-chunk surface span stays at or above `32 m`, while the topology implementation still supports a hard cap of `DEFAULT_MAX_LOD = 10` for larger worlds or explicit fixed overrides.
+- `PlanetRoot` now exposes `planet_radius` in the inspector and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
 
 ## Documentation Checked Before Implementation
 
@@ -30,7 +32,10 @@ Checked on 2026-03-22:
 - Godot stable `RenderingServer` docs for the server-driven render ownership model used by the budgeted commit path.
 - Godot stable `PhysicsServer3D` docs for the conservative body/shape residency model that Phase 13 budgets and pool limits constrain.
 - Godot stable `Thread-safe APIs` docs for the server-threading constraints that still shape worker/commit ownership.
+- Godot stable `ProjectSettings` docs for custom project-setting registration and editor exposure.
+- Godot stable `SphereMesh` docs for the editor preview primitive.
 - godot-rust built-in types docs for `PackedByteArray` copy-on-write semantics and reusable packed staging assumptions carried forward by the budgeted runtime path.
+- godot-rust `GodotClass` docs for `#[class(tool)]` editor execution and exported inspector properties.
 
 Constraints carried into code:
 
@@ -55,9 +60,11 @@ These defaults are not final tuning values. They are stable starting points that
 
 ```text
 MAX_LOD                         = radius-derived from planet_radius
+MAX_LOD_CAP_PROJECT_SETTING     = 10
 MIN_AVG_CHUNK_SURFACE_SPAN      = 32.0 m
-TOPOLOGY_SUPPORTED_MAX_LOD      = 10
+TOPOLOGY_SUPPORTED_MAX_LOD      = 16
 PAYLOAD_PRECOMPUTE_MAX_LOD      = 5
+METADATA_PRECOMPUTE_MAX_LOD     = runtime MAX_LOD by default
 QUADS_PER_EDGE                  = 32
 SAMPLED_EDGE                    = 35   // 33 visible + 2 border
 SPLIT_THRESHOLD_PX              = 8
@@ -81,7 +88,10 @@ WORKER_SCRATCH_COUNT            = one reusable scratch set per worker
 Why these are good starting values:
 
 - radius-derived `max_lod` avoids tiny finest chunks on small planets and sharply reduces active-chunk churn near the surface
+- the editor-facing cap stays explicit and easy to tune per project without recompiling Rust, while still leaving headroom above the shipped default for larger planets
 - `planet_radius = 1000` now resolves to `max_lod = 5`, which keeps average finest-chunk surface span around `45.2 m`
+- the default metadata prebuild window now follows that effective `max_lod`, so a `planet_radius = 1000` world still prebuilds only through LOD `5`, while larger planets no longer depend on runtime metadata misses during traversal
+- even if `world2/runtime/max_lod_cap` is raised above `10`, a `planet_radius = 1000` world still stays at `max_lod = 5` because the radius-derived target is reached before the cap
 - `32` quads keeps index buffers small and reusable
 - `33` visible vertices support stable normals/materials
 - border ring resolves most seam/shading issues early
@@ -91,6 +101,7 @@ New explicit controls:
 
 - `PAYLOAD_PRECOMPUTE_MAX_LOD`
 - `MIN_AVG_CHUNK_SURFACE_SPAN`
+- `MAX_LOD_CAP_PROJECT_SETTING`
 - `UPLOAD_BUDGET_PER_FRAME`
 - `PHYSICS_MAX_ACTIVE_CHUNKS`
 - per-kind render/physics commit budgets
@@ -112,6 +123,8 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Keep worker scratch pool count aligned to worker count.
 - [x] Keep payload precompute window capped at LOD 5 unless profiling justifies change.
 - [x] Delay resolution increases until profiling evidence exists.
+- [x] Expose the project-wide `max_lod` cap in the Godot editor instead of hardcoding it in Rust only.
+- [x] Expose the planet radius on `PlanetRoot` and show a matching editor preview sphere.
 
 ## Prerequisites
 
@@ -131,6 +144,7 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Budget saturation defers work instead of frame spikes.
 - [x] Pool sizes remain bounded under camera churn.
 - [x] Runtime remains stable with default values under representative traversal.
+- [x] Tool-mode `PlanetRoot` can initialize in editor context without panicking while registering the custom project setting.
 
 ## Definition of Done
 
@@ -138,13 +152,14 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Back-pressure controls are active and measurable.
 - [x] Any deviations from defaults are justified by profiling notes.
 - [x] Default runtime `max_lod` no longer produces sub-32-meter average finest chunks on small planets.
+- [x] Planet size and the global LOD cap are visible/editable from the Godot editor.
 
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage updated for the radius-derived `max_lod` policy. The default `planet_radius = 1000` profile now resolves to `max_lod = 5`, clamps metadata/payload precompute windows to that effective max, and keeps the average finest-chunk surface span above the new `32 m` target while preserving the existing commit/upload/pool controls.
-- [x] Profiles and scenarios tested: unit tests covering the documented default numbers, budget saturation, physics-set limits, and pool watermark enforcement; default headless startup camera through the repository Godot binary in `../godot/bin`.
-- [x] Follow-up actions: gather a moving-camera runtime trace to confirm the new radius-derived `max_lod` policy materially reduces near-surface active chunk churn before adjusting chunk mesh density or commit budgets further.
+- [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage updated for the radius-derived `max_lod` policy and the new configurable cap. The default `planet_radius = 1000` profile still resolves to `max_lod = 5`, now reports `runtime_max_lod_cap = 10` with topology support through `16`, clamps metadata/payload precompute windows to the effective max, and keeps the average finest-chunk surface span above the `32 m` target while preserving the existing commit/upload/pool controls.
+- [x] Profiles and scenarios tested: unit tests covering the documented default numbers, cap behavior, budget saturation, physics-set limits, and pool watermark enforcement; default headless startup camera through the repository Godot binary in `../godot/bin`; editor-context headless startup to validate tool-mode `PlanetRoot` plus project-setting registration.
+- [x] Follow-up actions: if designers start using much larger radii, gather a moving-camera runtime trace with a raised `world2/runtime/max_lod_cap` before increasing mesh density or commit budgets further.
 
 ## References
 

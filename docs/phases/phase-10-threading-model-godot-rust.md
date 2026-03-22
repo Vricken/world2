@@ -27,12 +27,16 @@ The shipped runtime now keeps one explicit precision and origin policy:
 - chunk mesh/collider buffers are converted to chunk-local `f32` offsets at the final local-buffer boundary
 - render and physics transforms are derived from the same shared origin snapshot before server commit
 - the current shipping mode is thresholded camera-relative origin shifting, not Godot large-world coordinates
+- gameplay-scene root rebasing runs on `_physics_process()` so player/controller parents move on the physics tick instead of the render tick
 
 Operationally, this means:
 
 - `ChunkPayload` stores `chunk_origin_planet: DVec3` as the authoritative anchor for committed geometry
 - pooled render entries only retain reusable RIDs/staging; they do not become the source of truth for absolute position
 - when the shared origin recenters, active render instances and physics bodies are rebound to fresh relative transforms before the next visibility/commit pass
+- when the shared origin recenters, the scene root is repositioned on the same physics tick after the origin snapshot update so gameplay children stay aligned with the rebase boundary
+- if the active camera sits under a colliding `CharacterBody3D`, root rebasing is deferred for that tick so collision resolution is not disturbed mid-contact
+- actual root rebases call `reset_physics_interpolation()` so the shift behaves like an intentional teleport instead of interpolating stale parent transforms
 - frustum checks convert chunk centers to render-relative coordinates using the same origin snapshot used for render commit
 
 Current explicit decision:
@@ -94,16 +98,18 @@ Keep one origin policy across subsystems. Do not let render, physics, culling, a
 
 - The earlier plan text allowed a choice between large-world coordinates and origin shifting. The shipped implementation makes that decision explicit: shared camera-relative origin shifting is enabled by default and large-world coordinates remain off.
 - The earlier wording implied render-relative conversion while filling render buffers. The shipped runtime uses a slightly stricter split: workers generate local chunk buffers from `f64` planet-space plus a stable chunk anchor, and render/physics server transforms are then derived from the shared origin snapshot at commit/rebind time.
+- The earlier wording described scene-root rebasing generically. The shipped runtime now constrains that rebase to `_physics_process()` and temporarily defers it while the active camera's owning `CharacterBody3D` is in collision contact, which keeps gameplay-parent transforms aligned with Godot's documented physics-step movement model.
 
 ## Test Record (Fill In)
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed `42/42`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and logged `origin_mode=shared_camera_relative`, `large_world_coordinates=false`, `origin_recenter_distance=1024`, `origin_rebases=1`, `render_rebinds=0`, `physics_rebinds=0`, `worker_jobs=5`, `render_cold_commits=5`, and `physics_commits=0`.
+- [x] Result summary: `cargo test` passed `61/61`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and logged `origin_mode=shared_camera_relative`, `large_world_coordinates=false`, `origin_recenter_distance=1024`, `origin_rebases=1`, `render_rebinds=0`, `physics_rebinds=0`, `worker_inflight=1`, and `active_render=0` on the cold first tick while payload generation was still in flight.
 - [x] Origin policy mode: Shared camera-relative origin shifting with chunk-local `f32` buffers and `f64` chunk anchors.
-- [x] Follow-up actions: Phase 11 can now assume one shared precision/origin contract for seam validation, warm-path compatibility, and future asset placement.
+- [x] Follow-up actions: Phase 11 can now assume one shared precision/origin contract for seam validation, warm-path compatibility, and future asset placement, with gameplay-scene rebases happening on physics ticks rather than render ticks.
 
 ## References
 
 - [Large world coordinates - Godot docs](https://docs.godotengine.org/en/stable/tutorials/physics/large_world_coordinates.html)
 - [Optimizing 3D performance - Godot docs](https://docs.godotengine.org/en/latest/tutorials/performance/optimizing_3d_performance.html)
+- [Using physics interpolation - Godot docs](https://docs.godotengine.org/en/stable/tutorials/physics/interpolation/using_physics_interpolation.html)
 - [godot-rust built-in types (packed arrays)](https://godot-rust.github.io/book/godot-api/builtins.html)

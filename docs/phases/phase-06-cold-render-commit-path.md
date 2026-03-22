@@ -50,7 +50,6 @@ Runtime LOD is a cheap selector over cached metadata, and selection order is fix
 4. For each surviving chunk:
    - compute projected error in pixels
    - if split/merge hysteresis says split and lod < max_lod: recurse
-   - if child metadata is missing above the prebuild window: queue async metadata work and keep the current parent selected until child metadata arrives
    - else keep leaf
 5. Enforce max neighbor LOD delta = 1 by splitting overly coarse selected neighbors.
 6. Build new desired render set.
@@ -134,11 +133,10 @@ Because render/physics server object creation lands in later phases, this phase 
 
 ## Deviation Notes
 
-- The original phase wording implied precomputing metadata for every chunk through `MAX_LOD = 10`. In the current implementation, metadata is prebuilt only through the configured startup window and then generated asynchronously on demand above that window. The selector keeps coarse parents selected while missing child metadata is still in flight, so metadata misses no longer stall the frame.
+- The original phase wording implied precomputing metadata for every chunk through `MAX_LOD = 10`. The current implementation now prebuilds metadata through the effective runtime `max_lod`, using a dense compact metadata store instead of a hash map so the selector no longer depends on runtime metadata misses during normal traversal.
 - Physics residency still uses the active camera as the near-player proxy. The current maintenance pass sharply narrowed that bubble and added a hard active-chunk cap so close-to-surface traversal no longer activates most selected chunks for collision.
 - The 2026-03-22 maintenance pass reversed the earlier permissive defaults, restoring explicit back-pressure so visibility spikes turn into bounded streaming instead of `100 ms+` single-frame stalls.
 - The current streaming path now prefers temporary overlap over holes: old render or physics coverage may persist for extra frames while replacements are still in flight.
-- Async metadata generation can delay a split by a frame or more beyond the prebuilt window, but that delay now manifests as temporary coarse coverage rather than synchronous selector work.
 - Full in-editor orbit stress testing is still a follow-up. This phase records the shipped headless validation plus unit-test coverage for selector behavior and budgeting.
 
 ## Checklist
@@ -179,12 +177,12 @@ Because render/physics server object creation lands in later phases, this phase 
 - [x] Budget controls are enforced every frame.
 - [x] Metrics exist for queued/committed/deferred operations.
 - [x] Visible chunk retirement does not outrun replacement readiness.
-- [x] Metadata misses above the prebuild window no longer force synchronous selector work.
+- [x] Full startup metadata availability keeps the selector off the runtime metadata-generation path during normal traversal.
 
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed with `60/60` tests after the async streaming maintenance pass. The selector/commit path now keeps render parents alive until desired replacement coverage is active, delays physics retirement slightly longer than render when needed, and moves post-window metadata generation off the hot selection lane.
+- [x] Result summary: `cargo test` passed with `62/62` tests after the metadata-storage refactor. The selector/commit path now keeps render parents alive until desired replacement coverage is active, delays physics retirement slightly longer than render when needed, and starts with full metadata resident through runtime `max_lod` in the shipping path.
 - [x] Budget behavior notes: the tight-budget and per-kind budget unit tests confirm overflow work is deferred, render/physics activation spikes are capped independently, and starvation counters increment while work remains queued.
 - [x] Follow-up actions: re-profile a real fly-through with camera translation near the surface and verify that overlap-based retirement avoids visible holes without keeping too much stale coarse collision alive.
 

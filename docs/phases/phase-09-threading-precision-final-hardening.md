@@ -87,10 +87,11 @@ This keeps the worker side aggressive without allowing old intermediate LOD work
 
 ## Async Metadata Rules
 
-- startup still prebuilds metadata only through the configured `metadata_precompute_max_lod`
-- if selection needs child metadata above that window, it submits async metadata requests instead of building on the frame lane
-- selection keeps the current coarse parent active until the requested child metadata arrives and can be reconsidered on a later frame
+- startup now prebuilds metadata through the effective runtime `max_lod`, so the shipping runtime path does not depend on async metadata misses during traversal
+- the older async metadata request plumbing remains in code as a defensive/non-shipping fallback path
+- neighbor-LOD normalization now requests the missing coarse-side child metadata and temporarily collapses the over-fine side back to the nearest valid ancestor for that frame, instead of retrying the same unresolved split in a hot loop or leaving an invalid delta>1 seam in the selected set
 - ready metadata results are installed only if their epoch still matches the runtime's pending request table
+- resident metadata storage is now a dense slab indexed by `(lod, face, x, y)` and stores only compact bounds/metrics; `ChunkKey`, same-LOD neighbors, and the base surface class are reconstructed on access instead of stored redundantly per entry
 
 ## Async Collision Prep Rules
 
@@ -180,7 +181,7 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed `60/60`; the worker path now supports async render payload submission, async metadata generation above the startup window, off-thread collision face preprocessing, async asset-group snapshot preparation, queue-side supersession of older overlapping jobs, and epoch-based stale-result dropping before install. Headless runtime logs now expose `worker_submitted`, `worker_ready`, `worker_stale`, `worker_superseded`, and `worker_inflight` alongside the existing queue and scratch metrics.
+- [x] Result summary: `cargo test` passed `62/62`; the worker path now supports async render payload submission, dense slab-backed metadata storage that removes the old per-entry hash overhead from the resident metadata set, startup metadata prebuild through runtime `max_lod`, off-thread collision face preprocessing, async asset-group snapshot preparation, queue-side supersession of older overlapping jobs, and epoch-based stale-result dropping before install. Headless runtime logs now expose `worker_submitted`, `worker_ready`, `worker_stale`, `worker_superseded`, and `worker_inflight` alongside the existing queue and scratch metrics.
 - [x] Mode tested: Mode A only
 - [x] Follow-up actions: if profiling still shows worker generation dominating after the new async queue and lower default LOD depth, consider deeper batching/coalescing or a larger ownership refactor before exploring a GPU-assisted generation path.
 

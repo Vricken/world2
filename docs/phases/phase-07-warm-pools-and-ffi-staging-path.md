@@ -15,7 +15,7 @@ Implemented on 2026-03-21 in:
 What shipped:
 
 - Explicit Phase 07 runtime policy in `RuntimeConfig`, including `metadata_precompute_max_lod`, `payload_precompute_max_lod`, and a live-runtime `enable_godot_staging` switch used to keep plain Rust unit tests independent from Godot engine FFI.
-- Startup metadata prebuild through a configurable window (`metadata_precompute_max_lod = 5` by default), with lazy metadata fallback above that window.
+- Startup metadata prebuild now runs through the effective runtime `max_lod`.
 - Border-ring scalar sampling over the canonical `35 x 35` sample grid, including cube-surface remapping for samples that cross face edges or corners so normals remain seam-consistent.
 - CPU mesh derivation for visible vertices, including positions, sampled-field normals, tangents, UVs, colors/masks, and stitch-mask-driven canonical index selection.
 - Separate vertex, attribute, and index byte-region packing for the shipped surface class contract: `format_mask = 0x1B`, `vertex_stride = 12`, `attribute_stride = 24`, `index_stride = 4`.
@@ -43,7 +43,8 @@ Constraints carried into code:
 
 - `PlanetRuntime::new()` prebuilds metadata through `metadata_precompute_max_lod`.
 - `PlanetRuntime::build_metadata_tree_through_lod()` exists as the explicit Stage A builder.
-- `PlanetRuntime::ensure_chunk_meta()` still lazily fills metadata above the configured prebuild window.
+- Resident metadata is stored in dense per-face/per-lod slabs keyed by `(lod, face, x, y)`, not a `HashMap<ChunkKey, ChunkMeta>`.
+- `PlanetRuntime::ensure_chunk_meta()` remains as a defensive accessor, but the shipping runtime path starts with all metadata already resident through `max_lod`.
 
 ### Stage B - Sample Scalar Fields
 
@@ -78,7 +79,7 @@ Constraints carried into code:
 
 ## Deviation Notes
 
-- The original phase text implied metadata for every LOD at load. The shipped implementation makes that window explicit and bounded by config (`metadata_precompute_max_lod = 5` by default) to avoid allocating metadata for millions of chunks up front.
+- The original phase text implied metadata for every LOD at load. The shipped implementation now does exactly that by default up to the effective runtime `max_lod`, but stores only compact bounds/metrics in dense slabs instead of full `ChunkMeta` structs in a hash map so the default path avoids both runtime metadata misses and the older per-entry hash overhead. The config field still exists for tests and deliberate lower-memory experiments.
 - Payload precompute policy is now explicit in config, but payloads are still generated on demand for selected chunks rather than by a background worker.
 - Unit tests disable live Godot staging (`enable_godot_staging = false`) because `PackedByteArray` allocation requires the Godot engine runtime. The headless Godot validation path exercises the real staging behavior.
 - Phase 07 stops at payload generation and logical lifecycle preparation. The actual server-side RID commit path is still tracked in Phase 08.
