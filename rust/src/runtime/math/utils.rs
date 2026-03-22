@@ -112,8 +112,8 @@ pub(crate) fn collider_face_vertices_from_indices(
     collider_indices
         .iter()
         .filter_map(|index| {
-        let index = usize::try_from(*index).ok()?;
-        collider_vertices.get(index).copied()
-    })
+            let index = usize::try_from(*index).ok()?;
+            collider_vertices.get(index).copied()
+        })
         .collect()
 }

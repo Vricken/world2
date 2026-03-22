@@ -845,8 +845,11 @@ impl PlanetRuntime {
 
         let Some(desired) = ready_groups else {
             frame_state.phase12_active_groups = self.asset_groups.len();
-            frame_state.phase12_active_instances =
-                self.asset_groups.values().map(|group| group.instance_count).sum();
+            frame_state.phase12_active_instances = self
+                .asset_groups
+                .values()
+                .map(|group| group.instance_count)
+                .sum();
             return Ok(());
         };
 
@@ -886,14 +889,18 @@ impl PlanetRuntime {
 
             chunks.push(super::super::workers::asset_groups::AssetGroupChunkInput {
                 key,
-                chunk_origin_planet: self.meta.center_planet(&key).unwrap_or(payload.chunk_origin_planet),
+                chunk_origin_planet: self
+                    .meta
+                    .center_planet(&key)
+                    .unwrap_or(payload.chunk_origin_planet),
                 assets: payload.assets.clone(),
             });
 
             for family in payload.assets.iter().map(|asset| asset.family_id) {
                 let group_key =
                     asset_group_key_for_chunk(key, family, self.config.asset_group_chunk_span);
-                let anchor_key = asset_group_anchor_key(group_key, self.config.asset_group_chunk_span);
+                let anchor_key =
+                    asset_group_anchor_key(group_key, self.config.asset_group_chunk_span);
                 if let Some(origin) = self.meta.center_planet(&anchor_key) {
                     anchor_origins.insert(anchor_key, origin);
                 }

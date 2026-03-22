@@ -60,12 +60,50 @@ pub struct SelectionFrameState {
 }
 
 impl PlanetRuntime {
+    pub fn flush_pending_origin_rebinds(&mut self) {
+        if !self.origin_shift_pending_rebind {
+            return;
+        }
+
+        let mut frame_state = SelectionFrameState::default();
+        frame_state.phase10_origin_rebases = 1;
+        self.rebind_active_relative_transforms(&mut frame_state);
+        self.origin_shift_pending_rebind = false;
+        self.frame_state.phase10_origin_rebases = self
+            .frame_state
+            .phase10_origin_rebases
+            .saturating_add(frame_state.phase10_origin_rebases);
+        self.pending_origin_rebases = self
+            .pending_origin_rebases
+            .saturating_add(frame_state.phase10_origin_rebases);
+        self.frame_state.phase10_render_transform_rebinds = self
+            .frame_state
+            .phase10_render_transform_rebinds
+            .saturating_add(frame_state.phase10_render_transform_rebinds);
+        self.pending_render_transform_rebinds = self
+            .pending_render_transform_rebinds
+            .saturating_add(frame_state.phase10_render_transform_rebinds);
+        self.frame_state.phase10_physics_transform_rebinds = self
+            .frame_state
+            .phase10_physics_transform_rebinds
+            .saturating_add(frame_state.phase10_physics_transform_rebinds);
+        self.pending_physics_transform_rebinds = self
+            .pending_physics_transform_rebinds
+            .saturating_add(frame_state.phase10_physics_transform_rebinds);
+    }
+
     pub fn step_visibility_selection(&mut self, camera: &CameraState) -> Result<(), TopologyError> {
         let mut frame_state = SelectionFrameState {
             tick: self.frame_state.tick.saturating_add(1),
             phase9_worker_threads: self.threaded_payload_generator.worker_count(),
+            phase10_origin_rebases: self.pending_origin_rebases,
+            phase10_render_transform_rebinds: self.pending_render_transform_rebinds,
+            phase10_physics_transform_rebinds: self.pending_physics_transform_rebinds,
             ..SelectionFrameState::default()
         };
+        self.pending_origin_rebases = 0;
+        self.pending_render_transform_rebinds = 0;
+        self.pending_physics_transform_rebinds = 0;
         self.drain_ready_chunk_meta();
         if self.origin_shift_pending_rebind {
             frame_state.phase10_origin_rebases += 1;
@@ -86,7 +124,8 @@ impl PlanetRuntime {
 
     pub(crate) fn drain_ready_chunk_meta(&mut self) {
         for prepared in self.threaded_metadata_generator.drain_ready() {
-            let Some(expected_epoch) = self.pending_meta_requests.get(&prepared.key).copied() else {
+            let Some(expected_epoch) = self.pending_meta_requests.get(&prepared.key).copied()
+            else {
                 continue;
             };
             if expected_epoch != prepared.epoch {
@@ -105,11 +144,12 @@ impl PlanetRuntime {
         let epoch = self.next_meta_request_epoch;
         self.next_meta_request_epoch = self.next_meta_request_epoch.saturating_add(1);
         self.pending_meta_requests.insert(key, epoch);
-        self.threaded_metadata_generator.submit(ChunkMetaBuildRequest {
-            epoch,
-            key,
-            config: self.config.clone(),
-        });
+        self.threaded_metadata_generator
+            .submit(ChunkMetaBuildRequest {
+                epoch,
+                key,
+                config: self.config.clone(),
+            });
     }
 
     pub(crate) fn build_chunk_meta(&self, key: ChunkKey) -> Result<ChunkMeta, TopologyError> {
@@ -490,7 +530,13 @@ impl PlanetRuntime {
 
             if all_children_ready {
                 for child in children.iter().copied() {
-                    self.select_render_chunk(child, camera, selected, split_ancestors, frame_state)?;
+                    self.select_render_chunk(
+                        child,
+                        camera,
+                        selected,
+                        split_ancestors,
+                        frame_state,
+                    )?;
                 }
             } else {
                 selected.insert(key);
@@ -732,7 +778,8 @@ impl PlanetRuntime {
         let placement = build_chunk_asset_placement(&self.config, key);
         let collider_vertices = mesh.positions.clone();
         let collider_indices = mesh.indices.clone();
-        let collider_faces = collider_face_vertices_from_indices(&collider_vertices, &collider_indices);
+        let collider_faces =
+            collider_face_vertices_from_indices(&collider_vertices, &collider_indices);
         let prepared = PreparedRenderPayload {
             sequence: request.sequence,
             epoch: request.epoch,
@@ -877,8 +924,10 @@ impl PlanetRuntime {
         self.pending_payload_requests.remove(&prepared.key);
         frame_state.phase9_sample_scratch_reuse_hits +=
             usize::from(prepared.scratch_metrics.sample_reuse);
-        frame_state.phase9_mesh_scratch_reuse_hits += usize::from(prepared.scratch_metrics.mesh_reuse);
-        frame_state.phase9_pack_scratch_reuse_hits += usize::from(prepared.scratch_metrics.pack_reuse);
+        frame_state.phase9_mesh_scratch_reuse_hits +=
+            usize::from(prepared.scratch_metrics.mesh_reuse);
+        frame_state.phase9_pack_scratch_reuse_hits +=
+            usize::from(prepared.scratch_metrics.pack_reuse);
         frame_state.phase9_scratch_growth_events += prepared.scratch_metrics.growth_events;
         self.install_prepared_render_payload(prepared, frame_state);
         frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
@@ -890,7 +939,8 @@ impl PlanetRuntime {
         key: ChunkKey,
         desired_render: &HashSet<ChunkKey>,
     ) -> Result<bool, TopologyError> {
-        let required_surface_class = self.required_surface_class_for_selection(key, desired_render)?;
+        let required_surface_class =
+            self.required_surface_class_for_selection(key, desired_render)?;
         Ok(self
             .resident_payloads
             .get(&key)

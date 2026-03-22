@@ -33,11 +33,11 @@ use crate::mesh_topology::{self, StitchError, CANONICAL_TOPOLOGY_CLASS};
 use crate::topology::{self, TopologyError};
 
 use math::*;
-use workers::{PreparedRenderPayload, RenderPayloadRequest, ThreadedPayloadGenerator};
 use workers::{
     ChunkMetaBuildRequest, DesiredAssetGroupsBuildRequest, ThreadedAssetGroupGenerator,
     ThreadedMetadataGenerator,
 };
+use workers::{PreparedRenderPayload, RenderPayloadRequest, ThreadedPayloadGenerator};
 
 pub use assets::*;
 pub use data::*;
@@ -301,6 +301,9 @@ pub struct PlanetRuntime {
     pub frame_state: SelectionFrameState,
     pub deferred_starvation: HashMap<DeferredOpKey, u32>,
     origin_shift_pending_rebind: bool,
+    pending_origin_rebases: usize,
+    pending_render_transform_rebinds: usize,
+    pending_physics_transform_rebinds: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

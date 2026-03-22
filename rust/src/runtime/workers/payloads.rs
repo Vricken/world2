@@ -284,8 +284,7 @@ impl ThreadedPayloadGenerator {
             for job in jobs {
                 let before_len = queue_state.jobs.len();
                 queue_state.jobs.retain(|queued| {
-                    !(queued.epoch < job.epoch
-                        && keys_overlap_hierarchically(queued.key, job.key))
+                    !(queued.epoch < job.epoch && keys_overlap_hierarchically(queued.key, job.key))
                 });
                 superseded_jobs += before_len.saturating_sub(queue_state.jobs.len());
                 queue_state.jobs.push_back(job);

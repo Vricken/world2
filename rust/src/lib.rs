@@ -3,9 +3,9 @@ pub mod mesh_topology;
 pub mod runtime;
 pub mod topology;
 
+use godot::builtin::{VarDictionary, VariantType};
 use godot::classes::{CharacterBody3D, INode3D, Node, Node3D};
 use godot::classes::{Engine, MeshInstance3D, ProjectSettings, SphereMesh};
-use godot::builtin::{VarDictionary, VariantType};
 use godot::init::InitStage;
 use godot::prelude::*;
 use godot::register::info::PropertyHint;
@@ -14,8 +14,9 @@ use mesh_topology::{
     VISIBLE_VERTICES_PER_EDGE,
 };
 use runtime::{
-    CameraState, PlanetRuntime, CURRENT_IMPLEMENTED_PHASE, CURRENT_IMPLEMENTED_PHASE_LABEL,
-    DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS, NEXT_PHASE_LABEL, RuntimeConfig,
+    CameraState, PlanetRuntime, RuntimeConfig, CURRENT_IMPLEMENTED_PHASE,
+    CURRENT_IMPLEMENTED_PHASE_LABEL, DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+    NEXT_PHASE_LABEL,
 };
 use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT, MAX_SUPPORTED_MAX_LOD};
 
@@ -61,7 +62,7 @@ impl INode3D for PlanetRoot {
         }
 
         self.remove_runtime_preview_node();
-        self.base_mut().set_process(false);
+        self.base_mut().set_process(true);
         self.base_mut().set_physics_process(true);
         self.cache_world_rids();
         self.rebuild_runtime();
@@ -121,12 +122,6 @@ impl INode3D for PlanetRoot {
     fn process(&mut self, _delta: f64) {
         if self.is_editor_context() {
             self.sync_editor_preview();
-            return;
-        }
-    }
-
-    fn physics_process(&mut self, _delta: f64) {
-        if self.is_editor_context() {
             return;
         }
 
@@ -228,6 +223,14 @@ impl INode3D for PlanetRoot {
                 NEXT_PHASE_LABEL,
             );
         }
+    }
+
+    fn physics_process(&mut self, _delta: f64) {
+        if self.is_editor_context() {
+            return;
+        }
+
+        self.sync_runtime_origin_shift();
     }
 }
 
@@ -580,16 +583,6 @@ impl PlanetRoot {
 
     fn acquire_camera_state(&mut self) -> Option<CameraState> {
         let raw = self.acquire_raw_camera_state()?;
-        let camera_position_planet = self
-            .runtime
-            .camera_planet_position_from_render(raw.transform.origin);
-        if !self.should_defer_origin_shift_for_collision() {
-            self.runtime
-                .update_origin_from_camera(camera_position_planet);
-            self.apply_runtime_origin_shift();
-        }
-
-        let raw = self.acquire_raw_camera_state()?;
         Some(CameraState::from_godot(
             raw.transform,
             raw.frustum_planes,
@@ -644,6 +637,26 @@ impl PlanetRoot {
         self.cached_scenario_rid = Some(scenario_rid);
         self.cached_physics_space_rid = Some(physics_space_rid);
         self.runtime.set_world_rids(scenario_rid, physics_space_rid);
+    }
+
+    fn sync_runtime_origin_shift(&mut self) {
+        let Some(raw) = self.acquire_raw_camera_state() else {
+            return;
+        };
+        if self.should_defer_origin_shift_for_collision() {
+            return;
+        }
+
+        let camera_position_planet = self
+            .runtime
+            .camera_planet_position_from_render(raw.transform.origin);
+        if self
+            .runtime
+            .update_origin_from_camera(camera_position_planet)
+        {
+            self.apply_runtime_origin_shift();
+            self.runtime.flush_pending_origin_rebinds();
+        }
     }
 
     fn should_defer_origin_shift_for_collision(&self) -> bool {
@@ -703,10 +716,7 @@ fn register_world2_project_settings() {
     info.set("name", PROJECT_SETTING_MAX_LOD_CAP);
     info.set("type", VariantType::INT);
     info.set("hint", PropertyHint::RANGE);
-    info.set(
-        "hint_string",
-        format!("0,{},1", MAX_SUPPORTED_MAX_LOD),
-    );
+    info.set("hint_string", format!("0,{},1", MAX_SUPPORTED_MAX_LOD));
     settings.call("add_property_info", &[info.to_variant()]);
     settings.call(
         "set_initial_value",

@@ -37,6 +37,9 @@ impl PlanetRuntime {
             next_asset_group_epoch: 1,
             deferred_starvation: HashMap::new(),
             origin_shift_pending_rebind: false,
+            pending_origin_rebases: 0,
+            pending_render_transform_rebinds: 0,
+            pending_physics_transform_rebinds: 0,
         };
         runtime
             .build_metadata_tree_through_lod(
@@ -146,8 +149,7 @@ impl PlanetRuntime {
             self.meta.insert_chunk_meta(meta, true)?;
         }
 
-        self
-            .meta
+        self.meta
             .get_chunk_meta(key, self.base_chunk_surface_class()?)?
             .ok_or(TopologyError::InvalidChunkKey)
     }

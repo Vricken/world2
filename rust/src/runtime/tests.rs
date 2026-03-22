@@ -320,7 +320,10 @@ fn runtime_config_normalization_recomputes_radius_derived_lod_from_planet_radius
         Rid::Invalid,
     );
 
-    assert_eq!(runtime.config.max_lod_policy, MaxLodPolicyKind::RadiusDerived);
+    assert_eq!(
+        runtime.config.max_lod_policy,
+        MaxLodPolicyKind::RadiusDerived
+    );
     assert_eq!(runtime.config.max_lod, 7);
     assert_eq!(runtime.config.metadata_precompute_max_lod, 7);
     assert_eq!(runtime.config.payload_precompute_max_lod, 7);
@@ -549,7 +552,10 @@ fn metadata_precompute_defaults_to_effective_runtime_max_lod() {
         Rid::Invalid,
     );
 
-    assert_eq!(runtime.metadata_precompute_max_lod(), runtime.config.max_lod);
+    assert_eq!(
+        runtime.metadata_precompute_max_lod(),
+        runtime.config.max_lod
+    );
     assert_eq!(runtime.meta_count(), 6 * (1 + 4 + 16 + 64 + 256 + 1024));
 }
 
@@ -1239,7 +1245,12 @@ fn threaded_payload_generation_reuses_worker_scratch_on_follow_up_batch() {
         .enumerate()
         .map(|(sequence, key)| {
             runtime
-                .prepare_render_payload_request(sequence, sequence as u64 + 101, key, &desired_render)
+                .prepare_render_payload_request(
+                    sequence,
+                    sequence as u64 + 101,
+                    key,
+                    &desired_render,
+                )
                 .unwrap()
                 .unwrap()
         })
@@ -1248,16 +1259,11 @@ fn threaded_payload_generation_reuses_worker_scratch_on_follow_up_batch() {
 
     assert_eq!(runtime.threaded_payload_generator.worker_count(), 1);
     assert_eq!(second_batch.results.len(), keys.len());
-    assert!(
-        second_batch
-            .results
-            .iter()
-            .any(|prepared| {
-                prepared.scratch_metrics.sample_reuse
-                    || prepared.scratch_metrics.mesh_reuse
-                    || prepared.scratch_metrics.pack_reuse
-            })
-    );
+    assert!(second_batch.results.iter().any(|prepared| {
+        prepared.scratch_metrics.sample_reuse
+            || prepared.scratch_metrics.mesh_reuse
+            || prepared.scratch_metrics.pack_reuse
+    }));
 }
 
 #[test]
@@ -1266,7 +1272,9 @@ fn coverage_ready_requires_replacement_chunks_before_parent_retirement() {
     let children = parent.children().unwrap();
     let desired_render = children.into_iter().collect::<HashSet<_>>();
     let ready_none = HashSet::new();
-    let ready_partial = [children[0], children[1]].into_iter().collect::<HashSet<_>>();
+    let ready_partial = [children[0], children[1]]
+        .into_iter()
+        .collect::<HashSet<_>>();
     let ready_all = children.into_iter().collect::<HashSet<_>>();
 
     assert!(!PlanetRuntime::coverage_ready_for_key(
@@ -1662,6 +1670,34 @@ fn physics_selection_respects_active_chunk_cap() {
 
     assert_eq!(physics.len(), 3);
     assert!(physics.iter().all(|key| desired_render.contains(key)));
+}
+
+#[test]
+fn flush_pending_origin_rebinds_rebinds_active_transforms_immediately() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let key = sample_key();
+    let surface_class = sample_surface_class();
+    let mut payload = sample_payload(&surface_class, 9);
+    payload.chunk_origin_planet = DVec3::new(4.0, 5.0, 6.0);
+    runtime.insert_payload(key, payload);
+    runtime.active_render.insert(key);
+    runtime.active_physics.insert(key);
+
+    assert!(runtime.update_origin_from_camera(DVec3::new(2_048.0, 0.0, 0.0)));
+    runtime.flush_pending_origin_rebinds();
+
+    assert!(!runtime.origin_shift_pending_rebind);
+    assert_eq!(runtime.frame_state.phase10_origin_rebases, 1);
+    assert_eq!(runtime.frame_state.phase10_render_transform_rebinds, 1);
+    assert_eq!(runtime.frame_state.phase10_physics_transform_rebinds, 1);
 }
 
 #[test]

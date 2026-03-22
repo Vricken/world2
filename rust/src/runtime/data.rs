@@ -369,7 +369,8 @@ impl MetadataStore {
     }
 
     pub fn center_planet(&self, key: &ChunkKey) -> Option<DVec3> {
-        self.get_stored(key).map(|stored| stored.bounds.center_planet)
+        self.get_stored(key)
+            .map(|stored| stored.bounds.center_planet)
     }
 
     pub fn get_chunk_meta(
@@ -392,8 +393,9 @@ impl MetadataStore {
             meta.refresh_same_lod_neighbors()?;
         }
 
-        let (lod_index, face_index, slot_index, slot_count) =
-            self.slot_components(&meta.key).ok_or(TopologyError::InvalidChunkKey)?;
+        let (lod_index, face_index, slot_index, slot_count) = self
+            .slot_components(&meta.key)
+            .ok_or(TopologyError::InvalidChunkKey)?;
         let face_slots = &mut self.levels[lod_index][face_index];
         if face_slots.is_empty() {
             face_slots.resize(slot_count, None);
