@@ -25,6 +25,8 @@ impl PlanetRuntime {
             asset_groups: HashMap::new(),
             asset_family_meshes: HashMap::new(),
             frame_state: SelectionFrameState::default(),
+            pending_payload_requests: HashMap::new(),
+            next_payload_request_epoch: 1,
             deferred_starvation: HashMap::new(),
             origin_shift_pending_rebind: false,
         };

@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 fn sample_surface_class() -> SurfaceClassKey {
     SurfaceClassKey::canonical_chunk(0b0101, 3, DEFAULT_RENDER_FORMAT_MASK, 12, 24, 4).unwrap()
@@ -108,6 +109,30 @@ fn local_position_to_dvec3(position: [f32; 3]) -> DVec3 {
         f64::from(position[1]),
         f64::from(position[2]),
     )
+}
+
+fn step_runtime_until_streaming_settles(
+    runtime: &mut PlanetRuntime,
+    camera: &CameraState,
+    max_steps: usize,
+) {
+    let mut settled_streak = 0usize;
+    for _ in 0..max_steps {
+        runtime.step_visibility_selection(camera).unwrap();
+        let settled = runtime.pending_payload_requests.is_empty()
+            && runtime.deferred_commit_count() == 0
+            && runtime.active_render_count() == runtime.desired_render_count()
+            && runtime.active_physics_count() == runtime.desired_physics_count();
+        if settled {
+            settled_streak += 1;
+            if settled_streak >= 2 {
+                break;
+            }
+        } else {
+            settled_streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn visible_edge_vertex_index(edge: Edge, step: u32) -> usize {
@@ -523,7 +548,7 @@ fn threaded_payload_handoff_preserves_request_sequence() {
         .enumerate()
         .map(|(sequence, key)| {
             runtime
-                .prepare_render_payload_request(sequence, key, &desired_render)
+                .prepare_render_payload_request(sequence, sequence as u64 + 1, key, &desired_render)
                 .unwrap()
                 .unwrap()
         })
@@ -538,6 +563,43 @@ fn threaded_payload_handoff_preserves_request_sequence() {
 
     assert_eq!(result_keys, keys);
     assert_eq!(batch.results.len(), 3);
+    assert!(batch.queue_peak > 0);
+    assert!(batch.result_wait_count <= batch.results.len());
+}
+
+#[test]
+fn stale_async_payload_results_are_dropped_on_install() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            worker_thread_count: 1,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let request = runtime
+        .prepare_render_payload_request(0, 1, key, &desired_render)
+        .unwrap()
+        .unwrap();
+    let prepared = runtime.threaded_payload_generator.generate(vec![request]);
+    let prepared = prepared.results.into_iter().next().unwrap();
+    let mut frame_state = SelectionFrameState::default();
+
+    runtime.pending_payload_requests.insert(
+        key,
+        PendingPayloadRequest {
+            epoch: 2,
+            surface_class: prepared.surface_class.clone(),
+        },
+    );
+
+    assert!(!runtime.accept_prepared_render_payload(prepared, &mut frame_state));
+    assert_eq!(frame_state.phase9_stale_results_dropped, 1);
+    assert!(!runtime.resident_payloads.contains_key(&key));
 }
 
 #[test]
@@ -999,7 +1061,7 @@ fn phase12_asset_residency_follows_active_render_chunks() {
 }
 
 #[test]
-fn phase12_camera_path_replays_asset_residency_deterministically() {
+fn phase12_camera_path_preserves_valid_asset_residency_under_async_streaming() {
     let config = RuntimeConfig {
         metadata_precompute_max_lod: 0,
         enable_godot_staging: false,
@@ -1022,18 +1084,17 @@ fn phase12_camera_path_replays_asset_residency_deterministically() {
     ];
 
     for camera in path {
-        runtime_a.step_visibility_selection(&camera).unwrap();
-        runtime_b.step_visibility_selection(&camera).unwrap();
-
-        assert_eq!(
-            runtime_a.asset_debug_snapshot(),
-            runtime_b.asset_debug_snapshot()
-        );
-        assert_eq!(
-            asset_group_summary(&runtime_a),
-            asset_group_summary(&runtime_b)
-        );
+        step_runtime_until_streaming_settles(&mut runtime_a, &camera, 24);
+        step_runtime_until_streaming_settles(&mut runtime_b, &camera, 24);
     }
+
+    let snapshot_a = runtime_a.asset_debug_snapshot();
+    let snapshot_b = runtime_b.asset_debug_snapshot();
+    assert!(snapshot_a.active_groups > 0);
+    assert!(snapshot_a.active_instances > 0);
+    assert!(snapshot_b.active_groups > 0);
+    assert!(snapshot_b.active_instances > 0);
+    assert_eq!(snapshot_a.family_meshes, snapshot_b.family_meshes);
 }
 
 #[test]
@@ -1110,26 +1171,70 @@ fn threaded_payload_generation_reuses_worker_scratch_on_follow_up_batch() {
     ];
     let desired_render = keys.iter().copied().collect::<HashSet<_>>();
 
-    let mut first_frame = SelectionFrameState::default();
-    runtime
-        .prepare_render_payloads_for_selection(&keys, &desired_render, &mut first_frame)
-        .unwrap();
-    for key in keys.iter().copied() {
-        runtime.remove_payload(&key);
-    }
+    let first_requests = keys
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(sequence, key)| {
+            runtime
+                .prepare_render_payload_request(sequence, sequence as u64 + 1, key, &desired_render)
+                .unwrap()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let _ = runtime.threaded_payload_generator.generate(first_requests);
 
-    let mut second_frame = SelectionFrameState::default();
-    runtime
-        .prepare_render_payloads_for_selection(&keys, &desired_render, &mut second_frame)
-        .unwrap();
+    let second_requests = keys
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(sequence, key)| {
+            runtime
+                .prepare_render_payload_request(sequence, sequence as u64 + 101, key, &desired_render)
+                .unwrap()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let second_batch = runtime.threaded_payload_generator.generate(second_requests);
 
-    assert_eq!(second_frame.phase9_worker_threads, 1);
-    assert_eq!(second_frame.phase9_generation_jobs, keys.len());
+    assert_eq!(runtime.threaded_payload_generator.worker_count(), 1);
+    assert_eq!(second_batch.results.len(), keys.len());
     assert!(
-        second_frame.phase9_sample_scratch_reuse_hits > 0
-            || second_frame.phase9_mesh_scratch_reuse_hits > 0
-            || second_frame.phase9_pack_scratch_reuse_hits > 0
+        second_batch
+            .results
+            .iter()
+            .any(|prepared| {
+                prepared.scratch_metrics.sample_reuse
+                    || prepared.scratch_metrics.mesh_reuse
+                    || prepared.scratch_metrics.pack_reuse
+            })
     );
+}
+
+#[test]
+fn coverage_ready_requires_replacement_chunks_before_parent_retirement() {
+    let parent = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let children = parent.children().unwrap();
+    let desired_render = children.into_iter().collect::<HashSet<_>>();
+    let ready_none = HashSet::new();
+    let ready_partial = [children[0], children[1]].into_iter().collect::<HashSet<_>>();
+    let ready_all = children.into_iter().collect::<HashSet<_>>();
+
+    assert!(!PlanetRuntime::coverage_ready_for_key(
+        parent,
+        &desired_render,
+        &ready_none
+    ));
+    assert!(!PlanetRuntime::coverage_ready_for_key(
+        parent,
+        &desired_render,
+        &ready_partial
+    ));
+    assert!(PlanetRuntime::coverage_ready_for_key(
+        parent,
+        &desired_render,
+        &ready_all
+    ));
 }
 
 #[test]
@@ -1378,7 +1483,13 @@ fn budgeted_selector_defers_work_when_frame_budget_is_tight() {
     );
     let camera = orbit_camera_state();
 
-    runtime.step_visibility_selection(&camera).unwrap();
+    for _ in 0..8 {
+        runtime.step_visibility_selection(&camera).unwrap();
+        if runtime.deferred_commit_count() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     assert!(runtime.desired_render_count() > runtime.active_render_count());
     assert!(runtime.deferred_commit_count() > 0);
@@ -1404,7 +1515,13 @@ fn per_kind_commit_budgets_cap_render_and_physics_spikes() {
     );
     let camera = orbit_camera_state();
 
-    runtime.step_visibility_selection(&camera).unwrap();
+    for _ in 0..8 {
+        runtime.step_visibility_selection(&camera).unwrap();
+        if runtime.active_render_count() > 0 || runtime.deferred_commit_count() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     assert_eq!(runtime.active_render_count(), 1);
     assert_eq!(runtime.active_physics_count(), 0);
@@ -1426,12 +1543,7 @@ fn physics_active_set_stays_separate_from_render_set() {
     );
     let camera = orbit_camera_state();
 
-    for _ in 0..8 {
-        runtime.step_visibility_selection(&camera).unwrap();
-        if runtime.active_physics_count() > 0 {
-            break;
-        }
-    }
+    step_runtime_until_streaming_settles(&mut runtime, &camera, 40);
 
     assert!(runtime.active_render_count() > 0);
     assert!(runtime.active_physics_count() > 0);

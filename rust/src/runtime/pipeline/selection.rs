@@ -34,7 +34,12 @@ pub struct SelectionFrameState {
     pub phase8_fallback_incompatible_current_surface_class: usize,
     pub phase8_fallback_no_compatible_pooled_surface: usize,
     pub phase9_worker_threads: usize,
+    pub phase9_submitted_jobs: usize,
     pub phase9_generation_jobs: usize,
+    pub phase9_ready_results: usize,
+    pub phase9_stale_results_dropped: usize,
+    pub phase9_superseded_jobs: usize,
+    pub phase9_inflight_jobs: usize,
     pub phase9_queue_peak: usize,
     pub phase9_result_wait_count: usize,
     pub phase9_sample_scratch_reuse_hits: usize,
@@ -619,7 +624,7 @@ impl PlanetRuntime {
         desired_render: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
     ) -> Result<usize, TopologyError> {
-        let Some(request) = self.prepare_render_payload_request(0, key, desired_render)? else {
+        let Some(request) = self.prepare_render_payload_request(0, 0, key, desired_render)? else {
             return Ok(self.payload_upload_bytes(key));
         };
 
@@ -637,6 +642,7 @@ impl PlanetRuntime {
         let placement = build_chunk_asset_placement(&self.config, key);
         let prepared = PreparedRenderPayload {
             sequence: request.sequence,
+            epoch: request.epoch,
             key,
             surface_class: request.surface_class,
             sample_count: samples.len(),
@@ -654,6 +660,7 @@ impl PlanetRuntime {
     pub(crate) fn prepare_render_payload_request(
         &mut self,
         sequence: usize,
+        epoch: u64,
         key: ChunkKey,
         desired_render: &HashSet<ChunkKey>,
     ) -> Result<Option<RenderPayloadRequest>, TopologyError> {
@@ -671,6 +678,7 @@ impl PlanetRuntime {
 
         Ok(Some(RenderPayloadRequest {
             sequence,
+            epoch,
             key,
             surface_class,
             chunk_origin_planet: self.ensure_chunk_meta(key)?.bounds.center_planet,
@@ -678,7 +686,7 @@ impl PlanetRuntime {
         }))
     }
 
-    pub(crate) fn prepare_render_payloads_for_selection(
+    pub(crate) fn request_render_payloads_for_selection(
         &mut self,
         keys: &[ChunkKey],
         desired_render: &HashSet<ChunkKey>,
@@ -687,34 +695,139 @@ impl PlanetRuntime {
         let mut sorted_keys = keys.to_vec();
         sorted_keys.sort_unstable();
         sorted_keys.dedup();
+        let refresh_set = sorted_keys.iter().copied().collect::<HashSet<_>>();
+        self.pending_payload_requests
+            .retain(|key, _| refresh_set.contains(key));
 
         let mut requests = Vec::new();
         for key in sorted_keys {
-            if let Some(request) =
-                self.prepare_render_payload_request(requests.len(), key, desired_render)?
+            let surface_class = self.required_surface_class_for_selection(key, desired_render)?;
+            let existing_matches = self
+                .resident_payloads
+                .get(&key)
+                .map(|payload| {
+                    payload.surface_class == surface_class && payload.packed_regions.is_some()
+                })
+                .unwrap_or(false);
+            if existing_matches {
+                self.pending_payload_requests.remove(&key);
+                continue;
+            }
+
+            if self
+                .pending_payload_requests
+                .get(&key)
+                .map(|pending| pending.surface_class == surface_class)
+                .unwrap_or(false)
             {
+                continue;
+            }
+
+            let epoch = self.next_payload_request_epoch;
+            self.next_payload_request_epoch = self.next_payload_request_epoch.saturating_add(1);
+            if let Some(request) =
+                self.prepare_render_payload_request(requests.len(), epoch, key, desired_render)?
+            {
+                self.pending_payload_requests.insert(
+                    key,
+                    PendingPayloadRequest {
+                        epoch,
+                        surface_class: surface_class.clone(),
+                    },
+                );
                 requests.push(request);
             }
         }
 
-        let batch = self.threaded_payload_generator.generate(requests);
+        let submitted = self.threaded_payload_generator.submit(requests);
         frame_state.phase9_worker_threads = self.threaded_payload_generator.worker_count();
-        frame_state.phase9_generation_jobs += batch.results.len();
-        frame_state.phase9_queue_peak = frame_state.phase9_queue_peak.max(batch.queue_peak);
-        frame_state.phase9_result_wait_count += batch.result_wait_count;
-
-        for prepared in batch.results {
-            frame_state.phase9_sample_scratch_reuse_hits +=
-                usize::from(prepared.scratch_metrics.sample_reuse);
-            frame_state.phase9_mesh_scratch_reuse_hits +=
-                usize::from(prepared.scratch_metrics.mesh_reuse);
-            frame_state.phase9_pack_scratch_reuse_hits +=
-                usize::from(prepared.scratch_metrics.pack_reuse);
-            frame_state.phase9_scratch_growth_events += prepared.scratch_metrics.growth_events;
-            self.install_prepared_render_payload(prepared, frame_state);
-        }
+        frame_state.phase9_submitted_jobs += submitted.submitted_jobs;
+        frame_state.phase9_superseded_jobs += submitted.superseded_jobs;
+        frame_state.phase9_queue_peak = frame_state.phase9_queue_peak.max(submitted.queue_peak);
+        frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
 
         Ok(())
+    }
+
+    pub(crate) fn drain_ready_render_payloads(&mut self, frame_state: &mut SelectionFrameState) {
+        let batch = self.threaded_payload_generator.drain_ready();
+        frame_state.phase9_worker_threads = self.threaded_payload_generator.worker_count();
+        frame_state.phase9_ready_results += batch.results.len();
+        frame_state.phase9_generation_jobs += batch.results.len();
+
+        for prepared in batch.results {
+            self.accept_prepared_render_payload(prepared, frame_state);
+        }
+
+        frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
+    }
+
+    pub(crate) fn accept_prepared_render_payload(
+        &mut self,
+        prepared: PreparedRenderPayload,
+        frame_state: &mut SelectionFrameState,
+    ) -> bool {
+        let Some(pending) = self.pending_payload_requests.get(&prepared.key) else {
+            frame_state.phase9_stale_results_dropped += 1;
+            frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
+            return false;
+        };
+        if pending.epoch != prepared.epoch || pending.surface_class != prepared.surface_class {
+            frame_state.phase9_stale_results_dropped += 1;
+            frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
+            return false;
+        }
+
+        self.pending_payload_requests.remove(&prepared.key);
+        frame_state.phase9_sample_scratch_reuse_hits +=
+            usize::from(prepared.scratch_metrics.sample_reuse);
+        frame_state.phase9_mesh_scratch_reuse_hits += usize::from(prepared.scratch_metrics.mesh_reuse);
+        frame_state.phase9_pack_scratch_reuse_hits += usize::from(prepared.scratch_metrics.pack_reuse);
+        frame_state.phase9_scratch_growth_events += prepared.scratch_metrics.growth_events;
+        self.install_prepared_render_payload(prepared, frame_state);
+        frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
+        true
+    }
+
+    pub(crate) fn payload_matches_selection(
+        &mut self,
+        key: ChunkKey,
+        desired_render: &HashSet<ChunkKey>,
+    ) -> Result<bool, TopologyError> {
+        let required_surface_class = self.required_surface_class_for_selection(key, desired_render)?;
+        Ok(self
+            .resident_payloads
+            .get(&key)
+            .map(|payload| {
+                payload.surface_class == required_surface_class && payload.packed_regions.is_some()
+            })
+            .unwrap_or(false))
+    }
+
+    pub(crate) fn desired_keys_intersecting<'a>(
+        key: ChunkKey,
+        desired: &'a HashSet<ChunkKey>,
+    ) -> Vec<ChunkKey> {
+        desired
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate.face == key.face
+                    && (candidate.is_descendant_of(&key) || key.is_descendant_of(candidate))
+            })
+            .collect()
+    }
+
+    pub(crate) fn coverage_ready_for_key(
+        key: ChunkKey,
+        desired: &HashSet<ChunkKey>,
+        ready_desired: &HashSet<ChunkKey>,
+    ) -> bool {
+        let intersections = Self::desired_keys_intersecting(key, desired);
+        intersections.is_empty()
+            || intersections
+                .into_iter()
+                .all(|replacement| ready_desired.contains(&replacement))
     }
 
     fn install_prepared_render_payload(

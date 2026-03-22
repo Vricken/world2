@@ -282,10 +282,18 @@ pub struct PlanetRuntime {
     pub asset_groups: HashMap<AssetGroupKey, AssetGroupState>,
     pub asset_family_meshes: HashMap<u16, Rid>,
     threaded_payload_generator: ThreadedPayloadGenerator,
+    pending_payload_requests: HashMap<ChunkKey, PendingPayloadRequest>,
+    next_payload_request_epoch: u64,
     pub origin_snapshot: OriginSnapshot,
     pub frame_state: SelectionFrameState,
     pub deferred_starvation: HashMap<DeferredOpKey, u32>,
     origin_shift_pending_rebind: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingPayloadRequest {
+    epoch: u64,
+    surface_class: SurfaceClassKey,
 }
 
 impl PlanetRuntime {

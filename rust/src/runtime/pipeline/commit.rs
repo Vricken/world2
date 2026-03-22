@@ -36,6 +36,16 @@ impl PlanetRuntime {
         });
 
         frame_state.queued_commit_ops = ops.len();
+        let mut ready_render = self
+            .active_render
+            .intersection(desired_render)
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut ready_physics = self
+            .active_physics
+            .intersection(desired_physics)
+            .copied()
+            .collect::<HashSet<_>>();
 
         let mut committed = 0usize;
         let mut upload_bytes_committed = 0usize;
@@ -70,13 +80,28 @@ impl PlanetRuntime {
                 }
             };
 
-            if over_commit_budget || over_upload_budget || over_kind_budget {
+            let deactivation_would_open_hole = match op.kind {
+                CommitOpKind::DeactivateRender => {
+                    !Self::coverage_ready_for_key(op.key, desired_render, &ready_render)
+                }
+                CommitOpKind::DeactivatePhysics => {
+                    !Self::coverage_ready_for_key(op.key, desired_render, &ready_render)
+                        || !Self::coverage_ready_for_key(op.key, desired_physics, &ready_physics)
+                }
+                _ => false,
+            };
+
+            if over_commit_budget
+                || over_upload_budget
+                || over_kind_budget
+                || deactivation_would_open_hole
+            {
                 deferred_upload_bytes += op.upload_bytes;
                 deferred_now.insert(DeferredOpKey::new(op.kind, op.key));
                 continue;
             }
 
-            self.apply_commit_op(op, frame_state);
+            let committed_successfully = self.apply_commit_op(op, frame_state);
             committed += 1;
             upload_bytes_committed += op.upload_bytes;
             match op.kind {
@@ -85,6 +110,21 @@ impl PlanetRuntime {
                 CommitOpKind::DeactivateRender => budget_usage.render_deactivations += 1,
                 CommitOpKind::ActivatePhysics => budget_usage.physics_activations += 1,
                 CommitOpKind::DeactivatePhysics => budget_usage.physics_deactivations += 1,
+            }
+            if committed_successfully {
+                match op.kind {
+                    CommitOpKind::ActivateRender => {
+                        if desired_render.contains(&op.key) {
+                            ready_render.insert(op.key);
+                        }
+                    }
+                    CommitOpKind::ActivatePhysics => {
+                        if desired_physics.contains(&op.key) {
+                            ready_physics.insert(op.key);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -149,9 +189,13 @@ impl PlanetRuntime {
                 refresh_keys.push(key);
             }
         }
-        self.prepare_render_payloads_for_selection(&refresh_keys, desired_render, frame_state)?;
+        self.request_render_payloads_for_selection(&refresh_keys, desired_render, frame_state)?;
+        self.drain_ready_render_payloads(frame_state);
 
         for key in render_activations {
+            if !self.payload_matches_selection(key, desired_render)? {
+                continue;
+            }
             let meta = self.ensure_chunk_meta(key)?.clone();
             ops.push(CommitOp {
                 kind: CommitOpKind::ActivateRender,
@@ -173,6 +217,9 @@ impl PlanetRuntime {
             if !needs_refresh {
                 continue;
             }
+            if !self.payload_matches_selection(key, desired_render)? {
+                continue;
+            }
 
             let meta = self.ensure_chunk_meta(key)?.clone();
             ops.push(CommitOp {
@@ -190,6 +237,9 @@ impl PlanetRuntime {
             .collect::<Vec<_>>();
         physics_activations.sort_unstable();
         for key in physics_activations {
+            if !self.payload_matches_selection(key, desired_render)? {
+                continue;
+            }
             let meta = self.ensure_chunk_meta(key)?.clone();
             let distance = self.chunk_camera_distance(camera, &meta);
             self.ensure_collision_payload(key);
@@ -248,21 +298,24 @@ impl PlanetRuntime {
             .unwrap_or(0)
     }
 
-    fn apply_commit_op(&mut self, op: CommitOp, frame_state: &mut SelectionFrameState) {
+    fn apply_commit_op(&mut self, op: CommitOp, frame_state: &mut SelectionFrameState) -> bool {
         match op.kind {
             CommitOpKind::ActivateRender => {
                 if self.commit_render_payload(op.key, frame_state) {
                     self.active_render.insert(op.key);
                     self.ensure_rid_state(op.key).render_resident = true;
+                    true
                 } else {
                     self.active_render.remove(&op.key);
                     self.ensure_rid_state(op.key).render_resident = false;
+                    false
                 }
             }
             CommitOpKind::UpdateRender => {
                 if self.commit_render_payload(op.key, frame_state) {
                     self.active_render.insert(op.key);
                     self.ensure_rid_state(op.key).render_resident = true;
+                    true
                 } else {
                     let still_has_render_entry = self
                         .rid_state
@@ -272,9 +325,11 @@ impl PlanetRuntime {
                     if still_has_render_entry {
                         self.active_render.insert(op.key);
                         self.ensure_rid_state(op.key).render_resident = true;
+                        true
                     } else {
                         self.active_render.remove(&op.key);
                         self.ensure_rid_state(op.key).render_resident = false;
+                        false
                     }
                 }
             }
@@ -282,20 +337,24 @@ impl PlanetRuntime {
                 self.deactivate_render_commit(op.key);
                 self.active_render.remove(&op.key);
                 self.ensure_rid_state(op.key).render_resident = false;
+                true
             }
             CommitOpKind::ActivatePhysics => {
                 if self.commit_physics_payload(op.key, frame_state) {
                     self.active_physics.insert(op.key);
                     self.ensure_rid_state(op.key).physics_resident = true;
+                    true
                 } else {
                     self.active_physics.remove(&op.key);
                     self.ensure_rid_state(op.key).physics_resident = false;
+                    false
                 }
             }
             CommitOpKind::DeactivatePhysics => {
                 self.deactivate_physics_commit(op.key);
                 self.active_physics.remove(&op.key);
                 self.ensure_rid_state(op.key).physics_resident = false;
+                true
             }
         }
     }

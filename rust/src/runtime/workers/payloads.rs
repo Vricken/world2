@@ -3,6 +3,7 @@ use super::super::*;
 #[derive(Clone, Debug)]
 pub(crate) struct RenderPayloadRequest {
     pub sequence: usize,
+    pub epoch: u64,
     pub key: ChunkKey,
     pub surface_class: SurfaceClassKey,
     pub chunk_origin_planet: DVec3,
@@ -20,6 +21,7 @@ pub(crate) struct WorkerScratchJobMetrics {
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedRenderPayload {
     pub sequence: usize,
+    pub epoch: u64,
     pub key: ChunkKey,
     pub surface_class: SurfaceClassKey,
     pub sample_count: usize,
@@ -32,11 +34,24 @@ pub(crate) struct PreparedRenderPayload {
     pub scratch_metrics: WorkerScratchJobMetrics,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct PreparedPayloadBatch {
     pub results: Vec<PreparedRenderPayload>,
     pub queue_peak: usize,
     pub result_wait_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SubmittedPayloadBatch {
+    pub submitted_jobs: usize,
+    pub superseded_jobs: usize,
+    pub queue_peak: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReadyPayloadBatch {
+    pub results: Vec<PreparedRenderPayload>,
 }
 
 #[derive(Default)]
@@ -205,26 +220,21 @@ impl ThreadedPayloadGenerator {
         self.worker_count
     }
 
+    #[cfg(test)]
     pub(crate) fn generate(&self, jobs: Vec<RenderPayloadRequest>) -> PreparedPayloadBatch {
         if jobs.is_empty() {
             return PreparedPayloadBatch::default();
         }
 
-        let expected_results = jobs.len();
-        let mut queue_peak = 0usize;
-
-        {
-            let mut queue_state = self
-                .queue
-                .state
-                .lock()
-                .expect("phase 9 worker queue lock should not poison");
-            for job in jobs {
-                queue_state.jobs.push_back(job);
-                queue_peak = queue_peak.max(queue_state.jobs.len());
-            }
+        let submitted = self.submit(jobs);
+        let expected_results = submitted.submitted_jobs;
+        if expected_results == 0 {
+            return PreparedPayloadBatch {
+                results: Vec::new(),
+                queue_peak: submitted.queue_peak,
+                result_wait_count: 0,
+            };
         }
-        self.queue.wake.notify_all();
 
         let mut results = Vec::with_capacity(expected_results);
         let mut result_wait_count = 0usize;
@@ -248,9 +258,61 @@ impl ThreadedPayloadGenerator {
 
         PreparedPayloadBatch {
             results,
-            queue_peak,
+            queue_peak: submitted.queue_peak,
             result_wait_count,
         }
+    }
+
+    pub(crate) fn submit(&self, jobs: Vec<RenderPayloadRequest>) -> SubmittedPayloadBatch {
+        if jobs.is_empty() {
+            return SubmittedPayloadBatch::default();
+        }
+
+        let mut queue_peak = 0usize;
+        let mut superseded_jobs = 0usize;
+        let submitted_jobs = jobs.len();
+
+        {
+            let mut queue_state = self
+                .queue
+                .state
+                .lock()
+                .expect("phase 9 worker queue lock should not poison");
+            for job in jobs {
+                let before_len = queue_state.jobs.len();
+                queue_state.jobs.retain(|queued| {
+                    !(queued.epoch < job.epoch
+                        && keys_overlap_hierarchically(queued.key, job.key))
+                });
+                superseded_jobs += before_len.saturating_sub(queue_state.jobs.len());
+                queue_state.jobs.push_back(job);
+                queue_peak = queue_peak.max(queue_state.jobs.len());
+            }
+        }
+        self.queue.wake.notify_all();
+
+        SubmittedPayloadBatch {
+            submitted_jobs,
+            superseded_jobs,
+            queue_peak,
+        }
+    }
+
+    pub(crate) fn drain_ready(&self) -> ReadyPayloadBatch {
+        let mut results = Vec::new();
+
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(result) => results.push(result),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("phase 9 worker results channel disconnected unexpectedly");
+                }
+            }
+        }
+
+        results.sort_by(|a, b| a.epoch.cmp(&b.epoch).then(a.sequence.cmp(&b.sequence)));
+        ReadyPayloadBatch { results }
     }
 }
 
@@ -353,6 +415,7 @@ fn build_render_payload_with_scratch(
 
     PreparedRenderPayload {
         sequence: request.sequence,
+        epoch: request.epoch,
         key: request.key,
         surface_class: request.surface_class.clone(),
         sample_count,
@@ -376,6 +439,10 @@ fn build_render_payload_with_scratch(
             growth_events,
         },
     }
+}
+
+fn keys_overlap_hierarchically(a: ChunkKey, b: ChunkKey) -> bool {
+    a.face == b.face && (a.is_descendant_of(&b) || b.is_descendant_of(&a))
 }
 
 fn sample_chunk_scalar_field_into(

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Ship the documented Mode A worker/commit split: pure Rust worker generation, deterministic handoff back to the commit lane, synchronized warm-path ownership, and measurable scratch/queue behavior.
+Ship the documented Mode A worker/commit split: pure Rust worker generation, async request submission, epoch-safe handoff back to the commit lane, synchronized warm-path ownership, and measurable scratch/queue behavior.
 
 ## Continuity From Phases 01-08
 
@@ -47,7 +47,7 @@ pub enum PlanetCommand {
 
 - workers: persistent Rust threads that only sample, mesh, and byte-pack render payloads
 - commit side: single-lane warm/cold commit logic, RID ownership, pooled-entry routing, and Godot server calls
-- handoff: mutex/condvar worker queue plus deterministic sequence numbers on the result drain
+- handoff: mutex/condvar worker queue plus epoch-tagged requests/results, queue-side supersession of stale overlapping jobs, and commit-lane stale-result rejection before install
 
 Godot thread-safety docs allow server access from threads, but the shipping implementation intentionally keeps all server and staging mutation on the commit lane. That keeps Phase 09 independent of project thread-setting changes and avoids scene-tree or GPU-adjacent work in workers.
 
@@ -74,6 +74,16 @@ Practical ownership models:
 
 The current codebase implements option `1`.
 
+## Async Queue Rules
+
+- submitting payload work must not block the selection/commit frame; payload generation now proceeds asynchronously across frames
+- each submitted request carries an epoch and desired surface class
+- ready results are installed only if the runtime still has a matching pending request for that chunk key, epoch, and surface class
+- queued overlapping requests from older epochs are superseded when a newer ancestor/descendant request for the same face region arrives
+- completed stale jobs are dropped on the commit lane instead of mutating runtime state
+
+This keeps the worker side aggressive without allowing old intermediate LOD work to overwrite newer visibility decisions.
+
 ## Worker Allocation Policy
 
 - avoid fresh large `Vec` allocation per job when possible
@@ -88,7 +98,9 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 
 - `PlanetRuntime` now owns a persistent `ThreadedPayloadGenerator` sized from `RuntimeConfig::worker_thread_count`.
 - Payload requests are collected in deterministic key order before entering the worker queue.
-- Worker results are sorted back into request sequence before any runtime state or Godot staging is touched.
+- The runtime now submits render payload requests asynchronously, drains only ready results each frame, and leaves in-flight work resident in the worker queue between frames.
+- Worker results are sorted by `(epoch, sequence)` before any runtime state or Godot staging is touched.
+- `pending_payload_requests` in `PlanetRuntime` is now the authority for whether a completed worker result is still valid.
 - Warm-path routing (`ReuseCurrentSurface`, `ReusePooledSurface`, `ColdCreate`) remains commit-lane only.
 - Physics activation remains commit-lane only and still derives collider payloads from the committed render payload.
 - Mode B is not implemented. There is no worker-side server mutation path in shipping code.
@@ -101,6 +113,8 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 - [x] Add synchronization guardrails.
 - [x] Reuse worker scratch buffers for mesh/packing jobs.
 - [x] Capture queue, contention, and allocation metrics.
+- [x] Reject stale worker output with epoch checks before runtime install.
+- [x] Allow newer overlapping LOD requests to supersede older queued requests.
 
 ## Prerequisites
 
@@ -120,25 +134,28 @@ The current worker implementation reuses sample, mesh, pack, and slope-height sc
 - [x] Determinism remains stable for fixed startup camera/headless path.
 - [x] Scratch reuse and growth metrics are emitted for tuning.
 - [x] No mutable staging sharing occurs across concurrent worker jobs.
+- [x] Async request/result path drops stale results instead of regressing to older LOD decisions.
 
 ## Definition of Done
 
 - [x] Worker/commit responsibilities are clean and enforceable.
 - [x] Mode A is stable under the current headless validation path.
 - [x] Threading metrics support tuning decisions.
+- [x] Async payload submission no longer forces the frame to wait for every requested chunk mesh.
 
 ## Deviations From Earlier Plan Text
 
 - The earlier master-plan wording allowed a lock-free queue or a double-buffered command list. The shipped implementation uses a persistent mutex/condvar queue with deterministic sequence ordering because it is simpler to reason about and matches the current safety goals.
 - The earlier master-plan wording described a more aggressive Mode B. The current phase text intentionally removes that path; shipping code is Mode A only.
 - Scratch reuse currently targets worker-side generation buffers. Resident payload storage still owns its final mesh and packed buffers after handoff, so the current optimization pass focused on removing temporary worker allocations before attempting a larger ownership refactor.
+- The earlier phase wording emphasized deterministic result ordering at the frame boundary. The current implementation keeps deterministic request metadata and stale-result rejection, but intentionally allows cross-frame completion timing to vary so the queue can stay asynchronous.
 
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed `42/42`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the extension and logged `worker_threads=4`, `worker_jobs=5`, `worker_queue_peak=5`, `worker_waits=4`, `sample_scratch_reuse=1`, `mesh_scratch_reuse=1`, `pack_scratch_reuse=1`, `scratch_growth=40`, `render_cold_commits=5`, `physics_commits=0`, and `deferred_ops=0`.
+- [x] Result summary: `cargo test` passed `60/60`; the worker path now supports async request submission, queue-side supersession of older overlapping jobs, and epoch-based stale-result dropping before install. Headless runtime logs now expose `worker_submitted`, `worker_ready`, `worker_stale`, `worker_superseded`, and `worker_inflight` alongside the existing queue and scratch metrics.
 - [x] Mode tested: Mode A only
-- [x] Follow-up actions: if post-fix profiling shows worker generation dominant again after the visibility/physics reductions, reevaluate a larger ownership refactor or a GPU-assisted generation path from this cleaner baseline.
+- [x] Follow-up actions: if profiling still shows worker generation dominating after the new async queue and lower default LOD depth, consider priority-aware batching by camera distance or a larger ownership refactor before exploring a GPU-assisted generation path.
 
 ## References
 
