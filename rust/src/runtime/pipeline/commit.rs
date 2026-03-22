@@ -209,14 +209,32 @@ impl PlanetRuntime {
     fn apply_commit_op(&mut self, op: CommitOp, frame_state: &mut SelectionFrameState) {
         match op.kind {
             CommitOpKind::ActivateRender => {
-                self.commit_render_payload(op.key, frame_state);
-                self.active_render.insert(op.key);
-                self.ensure_rid_state(op.key).render_resident = true;
+                if self.commit_render_payload(op.key, frame_state) {
+                    self.active_render.insert(op.key);
+                    self.ensure_rid_state(op.key).render_resident = true;
+                } else {
+                    self.active_render.remove(&op.key);
+                    self.ensure_rid_state(op.key).render_resident = false;
+                }
             }
             CommitOpKind::UpdateRender => {
-                self.commit_render_payload(op.key, frame_state);
-                self.active_render.insert(op.key);
-                self.ensure_rid_state(op.key).render_resident = true;
+                if self.commit_render_payload(op.key, frame_state) {
+                    self.active_render.insert(op.key);
+                    self.ensure_rid_state(op.key).render_resident = true;
+                } else {
+                    let still_has_render_entry = self
+                        .rid_state
+                        .get(&op.key)
+                        .and_then(|state| state.render_instance_rid)
+                        .is_some();
+                    if still_has_render_entry {
+                        self.active_render.insert(op.key);
+                        self.ensure_rid_state(op.key).render_resident = true;
+                    } else {
+                        self.active_render.remove(&op.key);
+                        self.ensure_rid_state(op.key).render_resident = false;
+                    }
+                }
             }
             CommitOpKind::DeactivateRender => {
                 self.deactivate_render_commit(op.key);
@@ -224,9 +242,13 @@ impl PlanetRuntime {
                 self.ensure_rid_state(op.key).render_resident = false;
             }
             CommitOpKind::ActivatePhysics => {
-                self.commit_physics_payload(op.key, frame_state);
-                self.active_physics.insert(op.key);
-                self.ensure_rid_state(op.key).physics_resident = true;
+                if self.commit_physics_payload(op.key, frame_state) {
+                    self.active_physics.insert(op.key);
+                    self.ensure_rid_state(op.key).physics_resident = true;
+                } else {
+                    self.active_physics.remove(&op.key);
+                    self.ensure_rid_state(op.key).physics_resident = false;
+                }
             }
             CommitOpKind::DeactivatePhysics => {
                 self.deactivate_physics_commit(op.key);
@@ -248,9 +270,9 @@ impl PlanetRuntime {
         &mut self,
         key: ChunkKey,
         frame_state: &mut SelectionFrameState,
-    ) {
+    ) -> bool {
         let Some(payload) = self.resident_payloads.get_mut(&key) else {
-            return;
+            return false;
         };
 
         let surface_class = payload.surface_class.clone();
@@ -269,14 +291,22 @@ impl PlanetRuntime {
                 RenderLifecycleCommand::WarmReuseCurrent => {
                     let Some((mesh_rid, render_instance_rid)) = self.current_render_rids(key)
                     else {
-                        return;
+                        return self.commit_render_payload_cold(
+                            key,
+                            surface_class,
+                            mesh,
+                            packed_regions,
+                            gd_staging.take(),
+                            render_transform,
+                            frame_state,
+                        );
                     };
                     let Some(staging) = self.ensure_commit_staging(
                         gd_staging.take(),
                         packed_regions.as_ref(),
                         &surface_class,
                     ) else {
-                        return;
+                        return false;
                     };
                     let arrays = cpu_mesh_to_surface_arrays(&mesh);
 
@@ -296,7 +326,15 @@ impl PlanetRuntime {
                 }
                 RenderLifecycleCommand::WarmReusePooled => {
                     let Some(entry) = pooled_render_entry else {
-                        return;
+                        return self.commit_render_payload_cold(
+                            key,
+                            surface_class,
+                            mesh,
+                            packed_regions,
+                            gd_staging.take(),
+                            render_transform,
+                            frame_state,
+                        );
                     };
                     if let Some(previous_entry) = self.take_current_render_entry(key) {
                         self.recycle_render_entry(previous_entry);
@@ -307,7 +345,7 @@ impl PlanetRuntime {
                         packed_regions.as_ref(),
                         &surface_class,
                     ) else {
-                        return;
+                        return false;
                     };
                     let arrays = cpu_mesh_to_surface_arrays(&mesh);
 
@@ -335,37 +373,15 @@ impl PlanetRuntime {
                     frame_state.phase8_render_warm_pool_commits += 1;
                 }
                 RenderLifecycleCommand::ColdCreate(_) => {
-                    if let Some(previous_entry) = self.take_current_render_entry(key) {
-                        self.recycle_render_entry(previous_entry);
-                    }
-
-                    let mesh_rid = rendering_server.mesh_create();
-                    let arrays = cpu_mesh_to_surface_arrays(&mesh);
-                    rendering_server.mesh_add_surface_from_arrays(
-                        mesh_rid,
-                        PrimitiveType::TRIANGLES,
-                        &arrays,
-                    );
-                    let render_instance_rid = rendering_server.instance_create();
-                    rendering_server.instance_set_base(render_instance_rid, mesh_rid);
-                    rendering_server.instance_set_scenario(render_instance_rid, self.scenario_rid);
-                    rendering_server.instance_set_transform(render_instance_rid, render_transform);
-                    rendering_server.instance_set_visible(render_instance_rid, true);
-
-                    let staging = self.ensure_commit_staging(
-                        gd_staging.take(),
-                        packed_regions.as_ref(),
-                        &surface_class,
-                    );
-                    self.install_render_entry(
+                    return self.commit_render_payload_cold(
                         key,
-                        mesh_rid,
-                        render_instance_rid,
-                        surface_class.clone(),
-                        staging.clone(),
+                        surface_class,
+                        mesh,
+                        packed_regions,
+                        gd_staging.take(),
+                        render_transform,
+                        frame_state,
                     );
-                    gd_staging = staging;
-                    frame_state.phase8_render_cold_commits += 1;
                 }
             }
         } else {
@@ -404,19 +420,66 @@ impl PlanetRuntime {
         if rid_state.gd_staging.is_none() {
             rid_state.gd_staging = gd_staging;
         }
+        true
     }
 
-    fn commit_physics_payload(&mut self, key: ChunkKey, frame_state: &mut SelectionFrameState) {
+    fn commit_render_payload_cold(
+        &mut self,
+        key: ChunkKey,
+        surface_class: SurfaceClassKey,
+        mesh: CpuMeshBuffers,
+        packed_regions: Option<PackedMeshRegions>,
+        staging: Option<GdPackedStaging>,
+        render_transform: Transform3D,
+        frame_state: &mut SelectionFrameState,
+    ) -> bool {
+        if self.should_commit_to_servers() {
+            if let Some(previous_entry) = self.take_current_render_entry(key) {
+                self.recycle_render_entry(previous_entry);
+            }
+
+            let mut rendering_server = RenderingServer::singleton();
+            let mesh_rid = rendering_server.mesh_create();
+            let arrays = cpu_mesh_to_surface_arrays(&mesh);
+            rendering_server.mesh_add_surface_from_arrays(
+                mesh_rid,
+                PrimitiveType::TRIANGLES,
+                &arrays,
+            );
+            let render_instance_rid = rendering_server.instance_create();
+            rendering_server.instance_set_base(render_instance_rid, mesh_rid);
+            rendering_server.instance_set_scenario(render_instance_rid, self.scenario_rid);
+            rendering_server.instance_set_transform(render_instance_rid, render_transform);
+            rendering_server.instance_set_visible(render_instance_rid, true);
+
+            let staging =
+                self.ensure_commit_staging(staging, packed_regions.as_ref(), &surface_class);
+            self.install_render_entry(key, mesh_rid, render_instance_rid, surface_class, staging);
+        } else {
+            if let Some(previous_entry) = self.take_current_render_entry(key) {
+                self.recycle_render_entry(previous_entry);
+            }
+        }
+
+        frame_state.phase8_render_cold_commits += 1;
+        true
+    }
+
+    fn commit_physics_payload(
+        &mut self,
+        key: ChunkKey,
+        frame_state: &mut SelectionFrameState,
+    ) -> bool {
         self.ensure_collision_payload(key);
 
         let Some(payload) = self.resident_payloads.get(&key) else {
-            return;
+            return false;
         };
         let Some(collider_vertices) = payload.collider_vertices.clone() else {
-            return;
+            return false;
         };
         let Some(collider_indices) = payload.collider_indices.clone() else {
-            return;
+            return false;
         };
         let physics_transform = self.physics_transform_for_chunk(payload.chunk_origin_planet);
 
@@ -458,6 +521,7 @@ impl PlanetRuntime {
         rid_state.physics_shape_rid = Some(physics_shape_rid);
         rid_state.physics_resident = true;
         frame_state.phase8_physics_commits += 1;
+        true
     }
 
     fn deactivate_render_commit(&mut self, key: ChunkKey) {

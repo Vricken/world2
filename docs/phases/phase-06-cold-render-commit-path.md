@@ -116,8 +116,8 @@ This phase keeps physics conservative and budget-aware without equating it to fu
 
 After desired-set diffing:
 
-- cap logical commit work per frame with `COMMIT_BUDGET_PER_FRAME = 24`
-- cap logical upload work per frame with `UPLOAD_BUDGET_BYTES_PER_FRAME = 8 MiB`
+- cap logical commit work per frame with `COMMIT_BUDGET_PER_FRAME = 1024`
+- cap logical upload work per frame with `UPLOAD_BUDGET_BYTES_PER_FRAME = 64 MiB`
 - prioritize render activation first, then physics activation, then deactivation work
 - defer overflow and track starvation depth in `SelectionFrameState`
 
@@ -127,6 +127,7 @@ Because render/physics server object creation lands in later phases, this phase 
 
 - The original phase wording implied precomputing metadata for every chunk through `MAX_LOD = 10`. In the current implementation, metadata is built lazily on first touch and cached. This keeps the selector deterministic while avoiding a startup-time `HashMap` allocation on the order of millions of entries for unused far-future chunks.
 - Physics residency currently uses the active camera as the near-player proxy. The default scene now supplies that camera through the fly controller rig.
+- The maintenance pass before Phase 11 raised the default commit budget from `24` to `1024` and the upload budget from `8 MiB` to `64 MiB` so free-fly camera movement can activate chunk churn more aggressively without leaving chunk-sized holes during transition frames.
 - Full in-editor orbit stress testing is still a follow-up. This phase records the shipped headless validation plus unit-test coverage for selector behavior and budgeting.
 
 ## Checklist
