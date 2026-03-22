@@ -8,6 +8,7 @@ impl Default for PlanetRuntime {
 
 impl PlanetRuntime {
     pub fn new(config: RuntimeConfig, scenario_rid: Rid, physics_space_rid: Rid) -> Self {
+        let config = config.normalized();
         let mut runtime = Self {
             threaded_payload_generator: ThreadedPayloadGenerator::new(config.worker_thread_count),
             origin_snapshot: OriginSnapshot::for_config(&config, DVec3::ZERO),

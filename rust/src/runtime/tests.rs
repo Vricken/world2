@@ -260,15 +260,72 @@ fn payload_precompute_window_stays_bounded() {
 }
 
 #[test]
+fn radius_derived_max_lod_keeps_average_chunk_span_above_target() {
+    let derived = radius_derived_max_lod_for_planet_radius(
+        1_000.0,
+        DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+    );
+
+    assert_eq!(derived, 5);
+    assert!(
+        average_chunk_surface_span_meters(1_000.0, derived)
+            >= DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS
+    );
+    assert!(
+        average_chunk_surface_span_meters(1_000.0, derived + 1)
+            < DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS
+    );
+}
+
+#[test]
+fn runtime_config_normalization_recomputes_radius_derived_lod_from_planet_radius() {
+    let runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            planet_radius: 4_000.0,
+            metadata_precompute_max_lod: 9,
+            payload_precompute_max_lod: 9,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+
+    assert_eq!(runtime.config.max_lod_policy, MaxLodPolicyKind::RadiusDerived);
+    assert_eq!(runtime.config.max_lod, 7);
+    assert_eq!(runtime.config.metadata_precompute_max_lod, 7);
+    assert_eq!(runtime.config.payload_precompute_max_lod, 7);
+}
+
+#[test]
+fn fixed_max_lod_policy_still_allows_manual_override() {
+    let runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            planet_radius: 1_000.0,
+            max_lod_policy: MaxLodPolicyKind::Fixed,
+            max_lod: 3,
+            metadata_precompute_max_lod: 5,
+            payload_precompute_max_lod: 5,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+
+    assert_eq!(runtime.config.max_lod_policy, MaxLodPolicyKind::Fixed);
+    assert_eq!(runtime.config.max_lod, 3);
+    assert_eq!(runtime.config.metadata_precompute_max_lod, 3);
+    assert_eq!(runtime.config.payload_precompute_max_lod, 3);
+}
+
+#[test]
 fn phase13_default_runtime_config_matches_documented_starting_values() {
     let config = RuntimeConfig::default();
     let runtime = PlanetRuntime::new(config.clone(), Rid::Invalid, Rid::Invalid);
 
-    assert_eq!(config.max_lod, topology::DEFAULT_MAX_LOD);
-    assert_eq!(
-        config.payload_precompute_max_lod,
-        PAYLOAD_PRECOMPUTE_MAX_LOD
-    );
+    assert_eq!(config.max_lod_policy, MaxLodPolicyKind::RadiusDerived);
+    assert_eq!(config.max_lod, 5);
+    assert_eq!(config.payload_precompute_max_lod, 5);
+    assert_eq!(config.metadata_precompute_max_lod, 5);
     assert_eq!(config.split_threshold_px, DEFAULT_SPLIT_THRESHOLD_PX);
     assert_eq!(config.merge_threshold_px, DEFAULT_MERGE_THRESHOLD_PX);
     assert_eq!(config.horizon_safety_margin, DEFAULT_HORIZON_SAFETY_MARGIN);
@@ -316,6 +373,11 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
         config.physics_pool_watermark,
         DEFAULT_PHYSICS_POOL_WATERMARK
     );
+    assert_eq!(
+        average_chunk_surface_span_meters(config.planet_radius, config.max_lod),
+        average_chunk_surface_span_meters(runtime.config.planet_radius, runtime.config.max_lod)
+    );
+    assert_eq!(runtime.config.max_lod, config.max_lod);
     assert!(config.physics_pool_watermark < config.render_pool_watermark_per_class);
     assert!((1..=DEFAULT_MAX_WORKER_THREADS).contains(&config.worker_thread_count));
     assert_eq!(runtime.worker_thread_count(), config.worker_thread_count);

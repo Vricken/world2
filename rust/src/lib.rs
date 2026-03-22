@@ -11,7 +11,7 @@ use mesh_topology::{
 };
 use runtime::{
     CameraState, PlanetRuntime, CURRENT_IMPLEMENTED_PHASE, CURRENT_IMPLEMENTED_PHASE_LABEL,
-    NEXT_PHASE_LABEL,
+    DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS, NEXT_PHASE_LABEL,
 };
 use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT};
 
@@ -47,14 +47,16 @@ impl INode3D for PlanetRoot {
         let strategies = self.runtime.strategy_summary();
 
         godot_print!(
-            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} meta_precompute_max_lod={} payload_precompute_max_lod={} worker_threads={} prebuilt_meta={} edge_xforms={} default_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
+            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} runtime_max_lod={} meta_precompute_max_lod={} payload_precompute_max_lod={} min_avg_chunk_span_m={} worker_threads={} prebuilt_meta={} edge_xforms={} topology_supported_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
             CURRENT_IMPLEMENTED_PHASE_LABEL,
             self.has_cached_world_rids(),
             self.runtime.origin_mode_label(),
             self.runtime.config.use_large_world_coordinates,
             self.runtime.config.origin_recenter_distance,
+            self.runtime.config.max_lod,
             self.runtime.metadata_precompute_max_lod(),
             self.runtime.payload_precompute_max_lod(),
+            DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
             self.runtime.worker_thread_count(),
             self.runtime.meta_count(),
             DIRECTED_EDGE_TRANSFORM_COUNT,
@@ -263,6 +265,16 @@ impl PlanetRoot {
     #[func]
     fn payload_precompute_max_lod(&self) -> i64 {
         self.runtime.payload_precompute_max_lod() as i64
+    }
+
+    #[func]
+    fn runtime_max_lod(&self) -> i64 {
+        self.runtime.config.max_lod as i64
+    }
+
+    #[func]
+    fn runtime_min_average_chunk_surface_span_meters(&self) -> f64 {
+        DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS
     }
 
     #[func]

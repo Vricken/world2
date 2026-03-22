@@ -17,10 +17,11 @@ Implemented on 2026-03-22 in:
 
 What shipped:
 
-- Explicit Phase 13 default constants now anchor the runtime config for LOD, payload precompute scope, split/merge hysteresis, horizon slack, physics activation radius, commit/upload budgets, and per-kind render/physics commit caps.
+- Explicit Phase 13 default constants now anchor the runtime config for radius-derived LOD, payload precompute scope, split/merge hysteresis, horizon slack, physics activation radius, commit/upload budgets, and per-kind render/physics commit caps.
 - Budgeted diff application already defers render and physics work when total commit count, upload bytes, or per-kind caps are exceeded, and starvation counters remain visible in `SelectionFrameState` and `PlanetRoot` logs.
 - Render and physics pool reuse remain bounded, with the default physics pool watermark tightened to `4` so collision pooling stays more conservative than the render per-class watermark of `8`.
 - Worker-thread startup remains clamped to a small bounded count, and Phase 13 regression coverage now checks that the documented starting values and worker-count alignment stay explicit in code.
+- Default runtime `max_lod` is now derived from `planet_radius` so the average finest-chunk surface span stays at or above `32 m`, while the topology implementation still supports a hard cap of `DEFAULT_MAX_LOD = 10` for larger worlds or explicit fixed overrides.
 
 ## Documentation Checked Before Implementation
 
@@ -53,7 +54,9 @@ These defaults are not final tuning values. They are stable starting points that
 ## Starting Defaults
 
 ```text
-MAX_LOD                         = 9 or 10
+MAX_LOD                         = radius-derived from planet_radius
+MIN_AVG_CHUNK_SURFACE_SPAN      = 32.0 m
+TOPOLOGY_SUPPORTED_MAX_LOD      = 10
 PAYLOAD_PRECOMPUTE_MAX_LOD      = 5
 QUADS_PER_EDGE                  = 32
 SAMPLED_EDGE                    = 35   // 33 visible + 2 border
@@ -77,6 +80,8 @@ WORKER_SCRATCH_COUNT            = one reusable scratch set per worker
 
 Why these are good starting values:
 
+- radius-derived `max_lod` avoids tiny finest chunks on small planets and sharply reduces active-chunk churn near the surface
+- `planet_radius = 1000` now resolves to `max_lod = 5`, which keeps average finest-chunk surface span around `45.2 m`
 - `32` quads keeps index buffers small and reusable
 - `33` visible vertices support stable normals/materials
 - border ring resolves most seam/shading issues early
@@ -85,6 +90,7 @@ Why these are good starting values:
 New explicit controls:
 
 - `PAYLOAD_PRECOMPUTE_MAX_LOD`
+- `MIN_AVG_CHUNK_SURFACE_SPAN`
 - `UPLOAD_BUDGET_PER_FRAME`
 - `PHYSICS_MAX_ACTIVE_CHUNKS`
 - per-kind render/physics commit budgets
@@ -114,10 +120,11 @@ Together with pool watermarks, these establish back-pressure behavior:
 ## Ordered Build Steps
 
 1. [x] Apply default numbers to runtime config with explicit constants.
-2. [x] Enforce commit and upload budgets in active diff/commit scheduling.
-3. [x] Enforce render and physics pool watermarks with bounded free behavior.
-4. [x] Keep worker scratch count tied to worker-thread count.
-5. [x] Run baseline profiling before changing `QUADS_PER_EDGE` or major thresholds.
+2. [x] Derive default runtime `max_lod` from `planet_radius` and minimum average chunk span.
+3. [x] Enforce commit and upload budgets in active diff/commit scheduling.
+4. [x] Enforce render and physics pool watermarks with bounded free behavior.
+5. [x] Keep worker scratch count tied to worker-thread count.
+6. [x] Run baseline profiling before changing `QUADS_PER_EDGE` or major thresholds.
 
 ## Validation and Test Gates
 
@@ -130,13 +137,14 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Defaults are encoded and documented.
 - [x] Back-pressure controls are active and measurable.
 - [x] Any deviations from defaults are justified by profiling notes.
+- [x] Default runtime `max_lod` no longer produces sub-32-meter average finest chunks on small planets.
 
 ## Test Record
 
 - [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed `49/49`, `./scripts/build_rust.sh` built successfully, and `./scripts/run_godot.sh --headless --quit-after 5` loaded cleanly with the Phase 13 defaults. The first headless tick reported `desired_render=5`, `active_render=5`, `desired_physics=0`, `active_physics=0`, `queued_ops=5`, `deferred_ops=0`, `deferred_upload_bytes=0`, `render_pool_entries=0`, `physics_pool_entries=0`, and `starvation_frames=0`, with no shutdown RID leak errors.
+- [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage updated for the radius-derived `max_lod` policy. The default `planet_radius = 1000` profile now resolves to `max_lod = 5`, clamps metadata/payload precompute windows to that effective max, and keeps the average finest-chunk surface span above the new `32 m` target while preserving the existing commit/upload/pool controls.
 - [x] Profiles and scenarios tested: unit tests covering the documented default numbers, budget saturation, physics-set limits, and pool watermark enforcement; default headless startup camera through the repository Godot binary in `../godot/bin`.
-- [x] Follow-up actions: gather a moving-camera runtime trace that intentionally exercises the tighter physics pool recycling path before changing default pool sizes or per-kind commit budgets again.
+- [x] Follow-up actions: gather a moving-camera runtime trace to confirm the new radius-derived `max_lod` policy materially reduces near-surface active chunk churn before adjusting chunk mesh density or commit budgets further.
 
 ## References
 

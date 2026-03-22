@@ -9,6 +9,7 @@ mod tests;
 mod workers;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::f64::consts::PI;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -64,6 +65,7 @@ pub const DEFAULT_RENDER_INDEX_STRIDE: usize = 4;
 pub const DEFAULT_RENDER_POOL_WATERMARK_PER_CLASS: usize = 8;
 pub const DEFAULT_PHYSICS_POOL_WATERMARK: usize = 4;
 pub const DEFAULT_MAX_WORKER_THREADS: usize = 4;
+pub const DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS: f64 = 32.0;
 pub const CURRENT_IMPLEMENTED_PHASE: u8 = 15;
 pub const CURRENT_IMPLEMENTED_PHASE_LABEL: &str = "Phase 15 strategy-layer refinement";
 pub const NEXT_PHASE_LABEL: &str = "none";
@@ -231,6 +233,39 @@ pub const BUILD_ORDER_HANDOFFS: [PhaseBuildHandoff; 5] = [
         "default numbers and bounded-churn controls",
     ),
 ];
+
+pub fn average_chunk_surface_span_meters(planet_radius: f64, lod: u8) -> f64 {
+    if !planet_radius.is_finite() || planet_radius <= 0.0 {
+        return 0.0;
+    }
+
+    let chunk_count = 6.0 * 4.0_f64.powi(i32::from(lod));
+    ((4.0 * PI * planet_radius * planet_radius) / chunk_count).sqrt()
+}
+
+pub fn radius_derived_max_lod_for_planet_radius(
+    planet_radius: f64,
+    min_average_chunk_surface_span_meters: f64,
+) -> u8 {
+    if !planet_radius.is_finite()
+        || planet_radius <= 0.0
+        || !min_average_chunk_surface_span_meters.is_finite()
+        || min_average_chunk_surface_span_meters <= 0.0
+    {
+        return 0;
+    }
+
+    let mut derived_max_lod = 0;
+    for lod in 0..=topology::DEFAULT_MAX_LOD {
+        let average_span = average_chunk_surface_span_meters(planet_radius, lod);
+        if average_span < min_average_chunk_surface_span_meters {
+            break;
+        }
+        derived_max_lod = lod;
+    }
+
+    derived_max_lod
+}
 
 #[derive(Debug)]
 pub struct PlanetRuntime {

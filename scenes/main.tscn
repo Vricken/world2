@@ -1,6 +1,6 @@
-[gd_scene load_steps=5 format=3 uid="uid://b51qkys1eqfw8"]
+[gd_scene format=3 uid="uid://b51qkys1eqfw8"]
 
-[ext_resource type="Script" path="res://scripts/player/fly_controller.gd" id="1_4plxw"]
+[ext_resource type="Script" uid="uid://o3wh0tgreryk" path="res://scripts/player/fly_controller.gd" id="1_4plxw"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sgp6g"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -31,8 +31,8 @@ shadow_enabled = true
 [node name="DebugRoot" type="Node3D" parent="." unique_id=1042470957]
 
 [node name="PlayerController" type="CharacterBody3D" parent="." unique_id=1381682098]
-script = ExtResource("1_4plxw")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3000)
+script = ExtResource("1_4plxw")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="PlayerController" unique_id=189540231]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
@@ -43,3 +43,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
 
 [node name="MainCamera" type="Camera3D" parent="PlayerController/PitchPivot" unique_id=404168182]
 current = true
+
+[node name="CSGBox3D" type="CSGBox3D" parent="." unique_id=72538160]
+transform = Transform3D(32, 0, 0, 0, 4000, 0, 0, 0, 32, 0, 0, 0)

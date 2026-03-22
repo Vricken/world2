@@ -686,8 +686,15 @@ pub enum RenderFallbackReason {
     NoCompatiblePooledSurface,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaxLodPolicyKind {
+    RadiusDerived,
+    Fixed,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeConfig {
+    pub max_lod_policy: MaxLodPolicyKind,
     pub max_lod: u8,
     pub metadata_precompute_max_lod: u8,
     pub payload_precompute_max_lod: u8,
@@ -725,17 +732,37 @@ pub struct RuntimeConfig {
     pub asset_group_chunk_span: u32,
 }
 
+impl RuntimeConfig {
+    pub fn normalized(mut self) -> Self {
+        self.max_lod = match self.max_lod_policy {
+            MaxLodPolicyKind::RadiusDerived => radius_derived_max_lod_for_planet_radius(
+                self.planet_radius,
+                DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+            ),
+            MaxLodPolicyKind::Fixed => self.max_lod.min(topology::DEFAULT_MAX_LOD),
+        };
+        self.metadata_precompute_max_lod = self.metadata_precompute_max_lod.min(self.max_lod);
+        self.payload_precompute_max_lod = self.payload_precompute_max_lod.min(self.max_lod);
+        self
+    }
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         let terrain = TerrainFieldSettings::default();
         let worker_thread_count = thread::available_parallelism()
             .map(|count| count.get().clamp(1, DEFAULT_MAX_WORKER_THREADS))
             .unwrap_or(1);
+        let max_lod = radius_derived_max_lod_for_planet_radius(
+            terrain.planet_radius,
+            DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
+        );
 
         Self {
-            max_lod: topology::DEFAULT_MAX_LOD,
-            metadata_precompute_max_lod: DEFAULT_METADATA_PRECOMPUTE_MAX_LOD,
-            payload_precompute_max_lod: PAYLOAD_PRECOMPUTE_MAX_LOD,
+            max_lod_policy: MaxLodPolicyKind::RadiusDerived,
+            max_lod,
+            metadata_precompute_max_lod: DEFAULT_METADATA_PRECOMPUTE_MAX_LOD.min(max_lod),
+            payload_precompute_max_lod: PAYLOAD_PRECOMPUTE_MAX_LOD.min(max_lod),
             worker_thread_count,
             planet_seed: DEFAULT_PLANET_SEED,
             cube_projection: CubeProjection::Spherified,
