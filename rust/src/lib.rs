@@ -4,7 +4,7 @@ pub mod runtime;
 pub mod topology;
 
 use godot::builtin::{VarDictionary, VariantType};
-use godot::classes::{CharacterBody3D, INode3D, Node, Node3D};
+use godot::classes::{CharacterBody3D, DirectionalLight3D, INode3D, Node, Node3D};
 use godot::classes::{Engine, MeshInstance3D, ProjectSettings, SphereMesh};
 use godot::init::InitStage;
 use godot::prelude::*;
@@ -22,6 +22,9 @@ use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT, MAX_SUPPORTED_MAX
 
 const PROJECT_SETTING_MAX_LOD_CAP: &str = "world2/runtime/max_lod_cap";
 const EDITOR_PREVIEW_NODE_NAME: &str = "__World2EditorPreview";
+const ATMOSPHERE_NODE_NAME: &str = "PlanetAtmosphere";
+const ATMOSPHERE_PLANET_RADIUS_PROPERTY: &str = "planet_radius";
+const ATMOSPHERE_HEIGHT_PROPERTY: &str = "atmosphere_height";
 
 #[derive(GodotClass)]
 #[class(tool, base = Node3D)]
@@ -33,6 +36,14 @@ pub struct PlanetRoot {
     runtime_tick_count: u64,
     #[export]
     planet_radius: f64,
+    #[export]
+    terrain_height_amplitude: f64,
+    #[export]
+    atmosphere_height: f64,
+    #[export]
+    atmosphere_height_follows_terrain_scale: bool,
+    #[export]
+    atmosphere_height_in_height_amplitudes: f64,
     #[export]
     frustum_culling_enabled: bool,
     #[export]
@@ -50,6 +61,10 @@ impl INode3D for PlanetRoot {
             cached_scenario_rid: None,
             cached_physics_space_rid: None,
             planet_radius: runtime.config.planet_radius,
+            terrain_height_amplitude: runtime.config.height_amplitude,
+            atmosphere_height: 100.0,
+            atmosphere_height_follows_terrain_scale: true,
+            atmosphere_height_in_height_amplitudes: 3.0,
             frustum_culling_enabled: runtime.config.enable_frustum_culling,
             keep_coarse_lod_chunks_rendered: runtime.config.keep_coarse_lod_chunks_rendered,
             runtime,
@@ -63,11 +78,13 @@ impl INode3D for PlanetRoot {
         if self.is_editor_context() {
             self.base_mut().set_process(true);
             self.base_mut().set_physics_process(false);
+            self.sync_atmosphere_settings();
             self.sync_editor_preview();
             return;
         }
 
         self.remove_runtime_preview_node();
+        self.sync_atmosphere_settings();
         self.base_mut().set_process(true);
         self.base_mut().set_physics_process(true);
         self.cache_world_rids();
@@ -127,10 +144,12 @@ impl INode3D for PlanetRoot {
 
     fn process(&mut self, _delta: f64) {
         if self.is_editor_context() {
+            self.sync_atmosphere_settings();
             self.sync_editor_preview();
             return;
         }
 
+        self.sync_atmosphere_settings();
         self.runtime_tick_count = self.runtime_tick_count.saturating_add(1);
 
         if self.runtime_tick_count == 1 || self.runtime_tick_count % 300 == 0 {
@@ -259,11 +278,21 @@ impl PlanetRoot {
     fn effective_runtime_config(&self) -> RuntimeConfig {
         let mut config = RuntimeConfig::default();
         config.planet_radius = self.planet_radius.max(1.0);
+        config.height_amplitude = self.terrain_height_amplitude.max(0.0);
         config.max_lod_cap = Self::project_max_lod_cap();
         config.metadata_precompute_max_lod = MAX_SUPPORTED_MAX_LOD;
         config.enable_frustum_culling = self.frustum_culling_enabled;
         config.keep_coarse_lod_chunks_rendered = self.keep_coarse_lod_chunks_rendered;
         config
+    }
+
+    fn effective_atmosphere_height(&self) -> f64 {
+        if self.atmosphere_height_follows_terrain_scale {
+            return (self.terrain_height_amplitude.max(0.0)
+                * self.atmosphere_height_in_height_amplitudes.max(0.0))
+            .max(0.0);
+        }
+        self.atmosphere_height.max(0.0)
     }
 
     fn project_max_lod_cap() -> u8 {
@@ -299,6 +328,49 @@ impl PlanetRoot {
         preview.set("mesh", &mesh.to_variant());
         preview.set_visible(true);
         self.editor_preview_radius_applied = radius;
+    }
+
+    fn sync_atmosphere_settings(&mut self) {
+        let radius = self.planet_radius.max(1.0);
+        let height = self.effective_atmosphere_height();
+        let light_transform = self.first_directional_light_transform();
+        let child_count = self.base().get_child_count();
+
+        for child_index in 0..child_count {
+            let Some(mut child) = self.base().get_child(child_index) else {
+                continue;
+            };
+            if child.get_name().to_string() != ATMOSPHERE_NODE_NAME {
+                continue;
+            }
+
+            child.set(ATMOSPHERE_PLANET_RADIUS_PROPERTY, &radius.to_variant());
+            child.set(ATMOSPHERE_HEIGHT_PROPERTY, &height.to_variant());
+
+            let Ok(mut atmosphere) = child.try_cast::<Node3D>() else {
+                continue;
+            };
+            if let Some(light_transform) = light_transform {
+                let mut atmosphere_transform = atmosphere.get_transform();
+                atmosphere_transform.basis = light_transform.basis;
+                atmosphere_transform.origin = Vector3::ZERO;
+                atmosphere.set_transform(atmosphere_transform);
+            }
+        }
+    }
+
+    fn first_directional_light_transform(&self) -> Option<Transform3D> {
+        let child_count = self.base().get_child_count();
+        for child_index in 0..child_count {
+            let Some(child) = self.base().get_child(child_index) else {
+                continue;
+            };
+            let Ok(light) = child.try_cast::<DirectionalLight3D>() else {
+                continue;
+            };
+            return Some(light.get_transform());
+        }
+        None
     }
 
     fn ensure_editor_preview(&mut self) -> Gd<MeshInstance3D> {
