@@ -67,6 +67,8 @@ _**Note:** The direction profile **is** related to from which angle and longitud
 
 The curve controls the atmosphere density for each longitude across the planet surface, where left side is the meridian totally opposed to the sun (midnight), and the right side is the meridian exactly under sun (midday).
 
+In this repository's shipped variant, the direction lookup is anchored to the planet-facing ray sample (sea-level hit when present, otherwise the ray's closest approach through the atmosphere) instead of the camera-facing outer shell entry. This keeps the day/night boundary and dawn/dusk colors fixed on the planet as the camera moves around it.
+
 The example has full density on all the diurne side, and decaying density on the nocturne one with the lowest point at midnight.
 
 The main color gradient sets the color perceived on the atmosphere when seeing the planet from outside, and basic sky color when inside the planet, including day and night.

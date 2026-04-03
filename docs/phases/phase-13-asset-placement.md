@@ -26,6 +26,7 @@ What shipped:
 - Render and physics pool reuse remain bounded, with the default physics pool watermark tightened to `4` so collision pooling stays more conservative than the render per-class watermark of `8`.
 - Worker-thread startup remains clamped to a small bounded count, and Phase 13 regression coverage now checks that the documented starting values and worker-count alignment stay explicit in code.
 - `PlanetRoot` now exposes `planet_radius`, `terrain_height_amplitude`, `atmosphere_height`, `atmosphere_height_follows_terrain_scale`, `atmosphere_height_in_height_amplitudes`, `frustum_culling_enabled`, and `keep_coarse_lod_chunks_rendered` in the inspector, keeps the `PlanetAtmosphere` child synced to the current radius and effective atmosphere thickness in both tool mode and runtime, and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
+- The vendored `extremely_fast_atmosphere` shader now anchors its direction-profile lookup to a planet-space sample along the view ray instead of the camera-facing outer shell entry point, so the terminator and twilight colors remain fixed on the planet during orbital fly-bys without adding raymarching or per-pixel loops.
 - The default `MainCamera` far clip now ships at `100000.0`, which is `25x` the Godot `Camera3D.far` default of `4000.0` and leaves more headroom for the atmosphere shader's depth-limited sky pass on a `planet_radius = 10000` world.
 
 ## Documentation Checked Before Implementation
@@ -42,6 +43,11 @@ Checked on 2026-03-23:
 - godot-rust built-in types docs for `PackedByteArray` copy-on-write semantics and reusable packed staging assumptions carried forward by the budgeted runtime path.
 - godot-rust `GodotClass` docs for `#[class(tool)]` editor execution and exported inspector properties.
 
+Checked on 2026-04-03:
+
+- Godot stable `Spatial shaders` docs for the view-space meaning of `VIEW`, `VERTEX`, `MODELVIEW_MATRIX`, `INV_VIEW_MATRIX`, `NODE_POSITION_WORLD`, and `CAMERA_POSITION_WORLD`.
+- godot-rust `Node3D` API docs to confirm the existing transform sync path remained compatible while the atmosphere fix stayed shader-local.
+
 Constraints carried into code:
 
 - Phase 13 changes runtime limits and pool defaults, not the documented server ownership model from Phases 08-12.
@@ -51,6 +57,8 @@ Constraints carried into code:
 - Atmosphere thickness should track the project's fake terrain vertical scale when desired; visual shell tuning is not always well served by real-planet radius ratios.
 - Disabling frustum culling only bypasses the runtime frustum-plane rejection; horizon culling, projected-error LOD selection, and budgeted commit behavior remain unchanged.
 - Coarse fallback coverage must stay selector-driven and server-managed; the runtime still does not create per-chunk scene-tree nodes.
+- The atmosphere fix should stay in the existing single-pass shader path; avoid introducing raymarching, loops, or extra scene nodes for a terminator-anchoring issue.
+- Direction-profile sampling should be derived from a planet-anchored point along the view ray so orbital camera motion does not shift the perceived sunrise/sunset band across the surface.
 
 ## Continuity From Phases 01-12
 
@@ -176,13 +184,19 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage still intact after adding the `PlanetRoot.atmosphere_height` inspector property and syncing the authored `PlanetAtmosphere` shell to `planet_radius` at tool time and runtime. The default `planet_radius = 1000` profile still resolves to `max_lod = 5`, keeps frustum culling on by default, leaves coarse fallback off by default, and now exposes the atmosphere shell thickness from the same root inspector that owns planet size.
 - [x] Profiles and scenarios tested: unit tests covering the documented default numbers, frustum-bypass behavior, coarse-root fallback behavior, cap behavior, budget saturation, physics-set limits, and pool watermark enforcement; `./scripts/build_rust.sh` completed successfully; `cargo test` passed (`65` tests); `./scripts/run_godot.sh --headless --quit-after 2` loaded the extension and main scene with the vendored `extremely_fast_atmosphere` shell attached, reporting `strategy_summary=projection=spherified_cube visibility=horizon_frustum_lod frustum_culling=true coarse_lod_fallback=false render_backend=server_pool_render_backend staging=godot_owned_packed_byte_array` on startup without the earlier atmosphere-parenting or `look_at()` warnings.
 - [x] Follow-up actions: if coarse fallback is enabled in production, capture a moving-camera trace to measure the extra overlapping residency against the reduced risk of transient empty coverage during rapid camera motion.
+- [x] Date: 2026-04-03
+- [x] Result summary: the atmosphere direction lookup now samples a planet-anchored point along the view ray, so the day/night split no longer slides toward the camera-facing shell during fly-bys. This preserves the plugin's texture-driven single-pass structure and avoids a larger atmosphere rewrite.
+- [x] Profiles and scenarios tested: `cargo test`; `./scripts/build_rust.sh`; `./scripts/run_godot.sh --headless --quit-after 2`.
+- [x] Deviations from the earlier phase note: the scene currently ships with `atmosphere_height = 2000.0`, not the older `350.0` value previously mentioned in the root README.
 
 ## References
 
 - [RenderingServer - Godot docs (stable)](https://docs.godotengine.org/en/stable/classes/class_renderingserver.html)
 - [PhysicsServer3D - Godot docs (stable)](https://docs.godotengine.org/en/stable/classes/class_physicsserver3d.html)
 - [Camera3D - Godot docs (stable)](https://docs.godotengine.org/en/stable/classes/class_camera3d.html)
+- [Spatial shaders - Godot docs (stable)](https://docs.godotengine.org/en/stable/tutorials/shaders/shader_reference/spatial_shader.html)
 - [Thread-safe APIs - Godot docs (stable)](https://docs.godotengine.org/en/stable/tutorials/performance/thread_safe_apis.html)
 - [godot-rust built-in types (packed arrays)](https://godot-rust.github.io/book/godot-api/builtins.html)
+- [godot-rust Node3D API docs](https://godot-rust.github.io/docs/gdext/master/godot/classes/struct.Node3D.html)
 - [godot-rust register/export docs](https://godot-rust.github.io/docs/gdext/master/godot/register/index.html)
 - [Project-local phase docs and runtime metrics policy](./README.md)

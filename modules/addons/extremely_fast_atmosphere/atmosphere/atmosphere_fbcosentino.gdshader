@@ -53,6 +53,20 @@ float get_average_height(vec3 ro, vec3 rd) {
 	return length(P);
 }
 
+vec3 get_direction_anchor(vec3 ro, vec3 rd, float max_dist, vec2 atmo_segment) {
+	vec2 planet_segment = ray_sphere_intersect(ro, rd, max_dist, sea_level);
+	if ((planet_segment.x >= 0.0) && (planet_segment.y >= planet_segment.x)) {
+		float surface_t = planet_segment.x;
+		if (surface_t <= 0.0) {
+			surface_t = planet_segment.y;
+		}
+		return ro + rd * surface_t;
+	}
+
+	float closest_t = clamp(dot(-ro, rd), atmo_segment.x, atmo_segment.y);
+	return ro + rd * closest_t;
+}
+
 
 varying vec3 cam_position;
 varying vec3 light_direction;
@@ -74,15 +88,22 @@ void fragment() {
 	vec3 world_pixel_position = (INV_VIEW_MATRIX * vec4(pixel_position, 1.0)).xyz;
 	
 	vec2 atmo_sphere_intersect = ray_sphere_intersect(cam_position, VIEW, max_distance, atmosphere_radius);
-	if ((atmo_sphere_intersect.x < 0.0) || (atmo_sphere_intersect.y < 0.0)) {
+	if ((atmo_sphere_intersect.x < 0.0)
+	|| (atmo_sphere_intersect.y < 0.0)
+	|| (atmo_sphere_intersect.y < atmo_sphere_intersect.x)) {
 		discard;
 	}
 	float ray_length = atmo_sphere_intersect.y - atmo_sphere_intersect.x; 
-	
-	vec3 global_view = (INV_VIEW_MATRIX * vec4(VIEW, 1.0)).xyz;
 
-	// Point in outer atmosphere where this pixel is
-	vec3 atmo_normal = normalize(cam_position + VIEW * max(0.0, min(atmo_sphere_intersect.y, atmo_sphere_intersect.x)));
+	// Anchor the direction profile to the planet surface or closest approach so
+	// the day/night boundary stays fixed on the globe instead of following the camera.
+	vec3 direction_anchor = get_direction_anchor(
+		cam_position,
+		VIEW,
+		max_distance,
+		atmo_sphere_intersect
+	);
+	vec3 atmo_normal = normalize(direction_anchor);
 	float atmo_normal_dot = dot(atmo_normal, light_direction);
 	float atmo_normal_side_dot = clamp(dot(VIEW, light_direction), 0.0, 1.0);
 	float back_looking_fac = clamp(-atmo_normal_dot * atmo_normal_side_dot * 2.0, 0.0, 1.0);
