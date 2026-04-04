@@ -8,7 +8,8 @@ fn sample_surface_class() -> SurfaceClassKey {
 fn test_runtime() -> PlanetRuntime {
     PlanetRuntime::new(
         RuntimeConfig {
-            metadata_precompute_max_lod: 0,
+            metadata_precompute_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+            dense_metadata_prebuild_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
             enable_godot_staging: false,
             ..RuntimeConfig::default()
         },
@@ -109,6 +110,12 @@ fn local_position_to_dvec3(position: [f32; 3]) -> DVec3 {
         f64::from(position[1]),
         f64::from(position[2]),
     )
+}
+
+fn chunk_count_through_lod(max_lod: u8) -> usize {
+    (0..=max_lod)
+        .map(|lod| Face::ALL.len() * (ChunkKey::resolution_for_lod(lod) as usize).pow(2))
+        .sum()
 }
 
 fn step_runtime_until_streaming_settles(
@@ -280,6 +287,41 @@ fn runtime_map_transitions_are_deterministic() {
 }
 
 #[test]
+fn metadata_store_supports_dense_and_sparse_entries_with_same_lookup_api() {
+    let dense_key = ChunkKey::new(Face::Px, 2, 1, 1);
+    let sparse_key = ChunkKey::new(Face::Nz, 9, 13, 27);
+    let surface_class = sample_surface_class();
+    let dense_meta = sample_meta(dense_key, surface_class.clone());
+    let sparse_meta = sample_meta(sparse_key, surface_class.clone());
+    let mut store = MetadataStore::new(13, 8);
+
+    store.insert_chunk_meta(dense_meta.clone(), false).unwrap();
+    store.insert_chunk_meta(sparse_meta.clone(), false).unwrap();
+
+    assert!(store.contains_key(&dense_key));
+    assert!(store.contains_key(&sparse_key));
+    assert_eq!(store.sparse_count(), 1);
+    assert_eq!(
+        store.center_planet(&dense_key),
+        Some(dense_meta.bounds.center_planet)
+    );
+    assert_eq!(
+        store.center_planet(&sparse_key),
+        Some(sparse_meta.bounds.center_planet)
+    );
+    assert_eq!(store.neighbors(&dense_key), Some(dense_meta.neighbors));
+    assert_eq!(store.neighbors(&sparse_key), Some(sparse_meta.neighbors));
+    assert_eq!(
+        store
+            .get_chunk_meta(sparse_key, surface_class.clone())
+            .unwrap()
+            .unwrap()
+            .key,
+        sparse_key
+    );
+}
+
+#[test]
 fn payload_precompute_window_stays_bounded() {
     let runtime = PlanetRuntime::default();
 
@@ -313,6 +355,7 @@ fn runtime_config_normalization_recomputes_radius_derived_lod_from_planet_radius
             planet_radius: 4_000.0,
             max_lod_cap: crate::topology::DEFAULT_MAX_LOD,
             metadata_precompute_max_lod: 9,
+            dense_metadata_prebuild_max_lod: 9,
             payload_precompute_max_lod: 9,
             ..RuntimeConfig::default()
         },
@@ -326,6 +369,7 @@ fn runtime_config_normalization_recomputes_radius_derived_lod_from_planet_radius
     );
     assert_eq!(runtime.config.max_lod, 7);
     assert_eq!(runtime.config.metadata_precompute_max_lod, 7);
+    assert_eq!(runtime.config.dense_metadata_prebuild_max_lod, 7);
     assert_eq!(runtime.config.payload_precompute_max_lod, 7);
 }
 
@@ -338,6 +382,7 @@ fn fixed_max_lod_policy_still_allows_manual_override() {
             max_lod: 3,
             max_lod_cap: crate::topology::DEFAULT_MAX_LOD,
             metadata_precompute_max_lod: 5,
+            dense_metadata_prebuild_max_lod: 5,
             payload_precompute_max_lod: 5,
             ..RuntimeConfig::default()
         },
@@ -348,6 +393,7 @@ fn fixed_max_lod_policy_still_allows_manual_override() {
     assert_eq!(runtime.config.max_lod_policy, MaxLodPolicyKind::Fixed);
     assert_eq!(runtime.config.max_lod, 3);
     assert_eq!(runtime.config.metadata_precompute_max_lod, 3);
+    assert_eq!(runtime.config.dense_metadata_prebuild_max_lod, 3);
     assert_eq!(runtime.config.payload_precompute_max_lod, 3);
 }
 
@@ -359,6 +405,7 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     assert_eq!(config.max_lod_policy, MaxLodPolicyKind::RadiusDerived);
     assert_eq!(config.max_lod_cap, crate::topology::DEFAULT_MAX_LOD);
     assert_eq!(config.max_lod, 5);
+    assert_eq!(config.dense_metadata_prebuild_max_lod, 5);
     assert_eq!(config.payload_precompute_max_lod, 5);
     assert_eq!(config.metadata_precompute_max_lod, 5);
     assert!(config.enable_frustum_culling);
@@ -433,12 +480,14 @@ fn radius_derived_max_lod_honors_configured_cap() {
         planet_radius: 100_000.0,
         max_lod_cap: 10,
         metadata_precompute_max_lod: 14,
+        dense_metadata_prebuild_max_lod: 14,
         payload_precompute_max_lod: 14,
         ..RuntimeConfig::default()
     }
     .normalized();
     assert_eq!(capped.max_lod, 10);
     assert_eq!(capped.metadata_precompute_max_lod, 10);
+    assert_eq!(capped.dense_metadata_prebuild_max_lod, 10);
     assert_eq!(capped.payload_precompute_max_lod, 10);
 }
 
@@ -543,10 +592,13 @@ fn phase15_visibility_strategy_matches_runtime_wrappers() {
 }
 
 #[test]
-fn metadata_precompute_defaults_to_effective_runtime_max_lod() {
+fn startup_metadata_prebuild_defaults_to_dense_cap_for_large_planets() {
     let runtime = PlanetRuntime::new(
         RuntimeConfig {
-            metadata_precompute_max_lod: 2,
+            planet_radius: 300_000.0,
+            max_lod_cap: 16,
+            metadata_precompute_max_lod: 16,
+            dense_metadata_prebuild_max_lod: 8,
             enable_godot_staging: false,
             ..RuntimeConfig::default()
         },
@@ -554,11 +606,83 @@ fn metadata_precompute_defaults_to_effective_runtime_max_lod() {
         Rid::Invalid,
     );
 
-    assert_eq!(
-        runtime.metadata_precompute_max_lod(),
-        runtime.config.max_lod
+    assert_eq!(runtime.config.max_lod, 13);
+    assert_eq!(runtime.metadata_precompute_max_lod(), 13);
+    assert_eq!(runtime.dense_metadata_prebuild_max_lod(), 8);
+    assert_eq!(runtime.meta_count(), chunk_count_through_lod(8));
+    assert_eq!(runtime.sparse_meta_count(), 0);
+}
+
+#[test]
+fn default_10km_world_prebuilds_through_dense_lod_cap() {
+    let runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            planet_radius: 10_000.0,
+            metadata_precompute_max_lod: 8,
+            dense_metadata_prebuild_max_lod: 8,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
     );
-    assert_eq!(runtime.meta_count(), 6 * (1 + 4 + 16 + 64 + 256 + 1024));
+
+    assert_eq!(runtime.config.max_lod, 8);
+    assert_eq!(runtime.metadata_precompute_max_lod(), 8);
+    assert_eq!(runtime.dense_metadata_prebuild_max_lod(), 8);
+    assert_eq!(runtime.meta_count(), chunk_count_through_lod(8));
+}
+
+#[test]
+fn sparse_metadata_streaming_keeps_parent_coverage_until_children_arrive() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            planet_radius: 300_000.0,
+            max_lod_policy: MaxLodPolicyKind::Fixed,
+            max_lod: 10,
+            metadata_precompute_max_lod: 8,
+            dense_metadata_prebuild_max_lod: 8,
+            enable_godot_staging: false,
+            worker_thread_count: 1,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera_position = DVec3::new(0.0, 0.0, 301_500.0);
+    let camera = CameraState {
+        position_planet: camera_position,
+        forward_planet: DVec3::new(0.0, 0.0, -1.0),
+        frustum_planes: box_test_frustum(Vector3::ZERO, 50_000.0),
+        projection_scale: 40_000.0,
+        origin: OriginSnapshot::for_config(&runtime.config, camera_position),
+    };
+    let mut frame_state = SelectionFrameState::default();
+
+    let initial = runtime
+        .select_render_set(&camera, &mut frame_state)
+        .unwrap();
+
+    assert!(runtime.pending_meta_requests.len() > 0);
+    assert!(initial.iter().all(|key| key.lod <= 8));
+    assert!(initial.iter().any(|key| key.lod == 8));
+
+    let mut refined = initial.clone();
+    for _ in 0..32 {
+        std::thread::sleep(Duration::from_millis(1));
+        let _ = runtime.drain_ready_chunk_meta();
+        let mut pass_frame_state = SelectionFrameState::default();
+        refined = runtime
+            .select_render_set(&camera, &mut pass_frame_state)
+            .unwrap();
+        if refined.iter().any(|key| key.lod > 8) {
+            break;
+        }
+    }
+
+    assert!(refined.iter().any(|key| key.lod > 8));
+    assert!(runtime.meta_count() > chunk_count_through_lod(8));
+    assert!(runtime.sparse_meta_count() > 0);
 }
 
 #[test]
@@ -1609,7 +1733,8 @@ fn coarse_lod_fallback_keeps_root_chunk_when_face_is_fully_culled() {
 fn neighbor_normalization_splits_coarse_side_when_metadata_is_available() {
     let mut runtime = PlanetRuntime::new(
         RuntimeConfig {
-            metadata_precompute_max_lod: 0,
+            metadata_precompute_max_lod: 3,
+            dense_metadata_prebuild_max_lod: 3,
             enable_godot_staging: false,
             ..RuntimeConfig::default()
         },
@@ -1619,8 +1744,11 @@ fn neighbor_normalization_splits_coarse_side_when_metadata_is_available() {
     let fine_key = ChunkKey::new(Face::Px, 3, 3, 0);
     let coarse_cover = ChunkKey::new(Face::Px, 1, 1, 0);
     let mut selected = [fine_key, coarse_cover].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
 
-    let splits = runtime.normalize_neighbor_lod_delta(&mut selected).unwrap();
+    let splits = runtime
+        .normalize_neighbor_lod_delta(&mut selected, &mut frame_state)
+        .unwrap();
 
     assert_eq!(splits, 1);
     assert!(!selected.contains(&coarse_cover));
@@ -1632,6 +1760,79 @@ fn neighbor_normalization_splits_coarse_side_when_metadata_is_available() {
     assert!(runtime
         .required_surface_class_for_selection(fine_key, &selected)
         .is_ok());
+}
+
+#[test]
+fn neighbor_normalization_fallback_coarsens_to_keep_delta_bounded() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 3,
+            dense_metadata_prebuild_max_lod: 3,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let fine_key = ChunkKey::new(Face::Px, 3, 3, 0);
+    let coarse_cover = ChunkKey::new(Face::Px, 1, 1, 0);
+    let collapsed_fine = fine_key.ancestor_at_lod(coarse_cover.lod + 1).unwrap();
+    let mut selected = [fine_key, coarse_cover].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
+
+    let splits = runtime
+        .normalize_neighbor_lod_delta_with_limits(&mut selected, &mut frame_state, 0, usize::MAX)
+        .unwrap();
+
+    assert_eq!(splits, 0);
+    assert!(selected.contains(&coarse_cover));
+    assert!(selected.contains(&collapsed_fine));
+    assert!(!selected.contains(&fine_key));
+    assert!(runtime
+        .required_surface_class_for_selection(collapsed_fine, &selected)
+        .is_ok());
+
+    for key in selected.iter().copied() {
+        for edge in Edge::ALL {
+            let neighbor_same_lod = topology::same_lod_neighbor(key, edge).unwrap();
+            if let Some(neighbor) =
+                PlanetRuntime::find_active_ancestor_covering(neighbor_same_lod, &selected)
+            {
+                assert!(
+                    key.lod.abs_diff(neighbor.lod) <= 1,
+                    "fallback left neighbor lod delta above one: {key:?} vs {neighbor:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn neighbor_normalization_fallback_coarsens_when_work_budget_is_exhausted() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 3,
+            dense_metadata_prebuild_max_lod: 3,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let fine_key = ChunkKey::new(Face::Px, 3, 3, 0);
+    let coarse_cover = ChunkKey::new(Face::Px, 1, 1, 0);
+    let collapsed_fine = fine_key.ancestor_at_lod(coarse_cover.lod + 1).unwrap();
+    let mut selected = [fine_key, coarse_cover].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
+
+    let splits = runtime
+        .normalize_neighbor_lod_delta_with_limits(&mut selected, &mut frame_state, 64, 0)
+        .unwrap();
+
+    assert_eq!(splits, 0);
+    assert!(selected.contains(&coarse_cover));
+    assert!(selected.contains(&collapsed_fine));
+    assert!(!selected.contains(&fine_key));
 }
 
 #[test]

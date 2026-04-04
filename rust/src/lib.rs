@@ -4,7 +4,7 @@ pub mod runtime;
 pub mod topology;
 
 use godot::builtin::{VarDictionary, VariantType};
-use godot::classes::{CharacterBody3D, DirectionalLight3D, INode3D, Node, Node3D};
+use godot::classes::{Camera3D, CharacterBody3D, DirectionalLight3D, INode3D, Node, Node3D};
 use godot::classes::{Engine, MeshInstance3D, ProjectSettings, SphereMesh};
 use godot::init::InitStage;
 use godot::prelude::*;
@@ -15,8 +15,8 @@ use mesh_topology::{
 };
 use runtime::{
     CameraState, PlanetRuntime, RuntimeConfig, CURRENT_IMPLEMENTED_PHASE,
-    CURRENT_IMPLEMENTED_PHASE_LABEL, DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
-    NEXT_PHASE_LABEL,
+    CURRENT_IMPLEMENTED_PHASE_LABEL, DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+    DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS, NEXT_PHASE_LABEL,
 };
 use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT, MAX_SUPPORTED_MAX_LOD};
 
@@ -25,6 +25,9 @@ const EDITOR_PREVIEW_NODE_NAME: &str = "__World2EditorPreview";
 const ATMOSPHERE_NODE_NAME: &str = "PlanetAtmosphere";
 const ATMOSPHERE_PLANET_RADIUS_PROPERTY: &str = "planet_radius";
 const ATMOSPHERE_HEIGHT_PROPERTY: &str = "atmosphere_height";
+const DEFAULT_DEBUG_PLAYER_SPAWN_MARGIN: f64 = 500.0;
+const DEFAULT_DEBUG_PLAYER_SPAWN_MARGIN_RADIUS_SCALE: f64 = 0.02;
+const DEFAULT_DEBUG_CAMERA_FAR_CLIP_MIN: f64 = 100_000.0;
 
 #[derive(GodotClass)]
 #[class(tool, base = Node3D)]
@@ -34,16 +37,13 @@ pub struct PlanetRoot {
     cached_physics_space_rid: Option<Rid>,
     runtime: PlanetRuntime,
     runtime_tick_count: u64,
+    runtime_camera_clip_bootstrapped: bool,
     #[export]
     planet_radius: f64,
     #[export]
     terrain_height_amplitude: f64,
     #[export]
     atmosphere_height: f64,
-    #[export]
-    atmosphere_height_follows_terrain_scale: bool,
-    #[export]
-    atmosphere_height_in_height_amplitudes: f64,
     #[export]
     frustum_culling_enabled: bool,
     #[export]
@@ -62,13 +62,12 @@ impl INode3D for PlanetRoot {
             cached_physics_space_rid: None,
             planet_radius: runtime.config.planet_radius,
             terrain_height_amplitude: runtime.config.height_amplitude,
-            atmosphere_height: 100.0,
-            atmosphere_height_follows_terrain_scale: true,
-            atmosphere_height_in_height_amplitudes: 3.0,
+            atmosphere_height: 0.2,
             frustum_culling_enabled: runtime.config.enable_frustum_culling,
             keep_coarse_lod_chunks_rendered: runtime.config.keep_coarse_lod_chunks_rendered,
             runtime,
             runtime_tick_count: 0,
+            runtime_camera_clip_bootstrapped: false,
             editor_preview_radius_applied: -1.0,
             editor_preview: None,
         }
@@ -87,6 +86,7 @@ impl INode3D for PlanetRoot {
         self.sync_atmosphere_settings();
         self.base_mut().set_process(true);
         self.base_mut().set_physics_process(true);
+        self.sync_runtime_scale_bootstrap();
         self.cache_world_rids();
         self.rebuild_runtime();
         self.apply_runtime_origin_shift();
@@ -96,7 +96,7 @@ impl INode3D for PlanetRoot {
         let strategies = self.runtime.strategy_summary();
 
         godot_print!(
-            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} planet_radius={} runtime_max_lod={} runtime_max_lod_cap={} meta_precompute_max_lod={} payload_precompute_max_lod={} min_avg_chunk_span_m={} worker_threads={} prebuilt_meta={} edge_xforms={} topology_default_max_lod={} topology_supported_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
+            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} planet_radius={} runtime_max_lod={} runtime_max_lod_cap={} metadata_precompute_max_lod={} dense_metadata_prebuild_max_lod={} payload_precompute_max_lod={} sparse_meta={} min_avg_chunk_span_m={} worker_threads={} prebuilt_meta={} edge_xforms={} topology_default_max_lod={} topology_supported_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
             CURRENT_IMPLEMENTED_PHASE_LABEL,
             self.has_cached_world_rids(),
             self.runtime.origin_mode_label(),
@@ -106,7 +106,9 @@ impl INode3D for PlanetRoot {
             self.runtime.config.max_lod,
             self.runtime.config.max_lod_cap,
             self.runtime.metadata_precompute_max_lod(),
+            self.runtime.dense_metadata_prebuild_max_lod(),
             self.runtime.payload_precompute_max_lod(),
+            self.runtime.sparse_meta_count(),
             DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
             self.runtime.worker_thread_count(),
             self.runtime.meta_count(),
@@ -165,6 +167,7 @@ impl INode3D for PlanetRoot {
             }
             return;
         };
+        self.sync_runtime_camera_clip_bootstrap();
 
         if let Err(err) = self.runtime.step_visibility_selection(&camera_state) {
             godot_error!(
@@ -180,10 +183,11 @@ impl INode3D for PlanetRoot {
             let assets = self.runtime.asset_debug_snapshot();
             let strategies = self.runtime.strategy_summary();
             godot_print!(
-                "PlanetRoot phase{} tick={} meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_submitted={} worker_jobs={} worker_ready={} worker_stale={} worker_superseded={} worker_inflight={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={} build_order_steps={} strategy_summary={} next_phase={}",
+                "PlanetRoot phase{} tick={} meta={} sparse_meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} meta_submitted={} meta_installed={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_submitted={} worker_jobs={} worker_ready={} worker_stale={} worker_superseded={} worker_inflight={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={} build_order_steps={} strategy_summary={} next_phase={}",
                 CURRENT_IMPLEMENTED_PHASE,
                 frame.tick,
                 self.runtime.meta_count(),
+                frame.sparse_meta_entries,
                 self.runtime.resident_payload_count(),
                 frame.desired_render_count,
                 self.runtime.active_render_count(),
@@ -204,6 +208,8 @@ impl INode3D for PlanetRoot {
                 frame.phase8_render_warm_pool_commits,
                 frame.phase8_render_cold_commits,
                 frame.phase8_physics_commits,
+                frame.phase9_meta_requests_submitted,
+                frame.phase9_meta_results_installed,
                 frame.phase8_fallback_missing_current_surface_class,
                 frame.phase8_fallback_incompatible_current_surface_class,
                 frame.phase8_fallback_no_compatible_pooled_surface,
@@ -273,6 +279,7 @@ impl PlanetRoot {
             self.cached_physics_space_rid.unwrap_or(Rid::Invalid),
         );
         self.runtime_tick_count = 0;
+        self.runtime_camera_clip_bootstrapped = false;
     }
 
     fn effective_runtime_config(&self) -> RuntimeConfig {
@@ -280,19 +287,15 @@ impl PlanetRoot {
         config.planet_radius = self.planet_radius.max(1.0);
         config.height_amplitude = self.terrain_height_amplitude.max(0.0);
         config.max_lod_cap = Self::project_max_lod_cap();
-        config.metadata_precompute_max_lod = MAX_SUPPORTED_MAX_LOD;
+        config.metadata_precompute_max_lod = DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD;
+        config.dense_metadata_prebuild_max_lod = DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD;
         config.enable_frustum_culling = self.frustum_culling_enabled;
         config.keep_coarse_lod_chunks_rendered = self.keep_coarse_lod_chunks_rendered;
         config
     }
 
     fn effective_atmosphere_height(&self) -> f64 {
-        if self.atmosphere_height_follows_terrain_scale {
-            return (self.terrain_height_amplitude.max(0.0)
-                * self.atmosphere_height_in_height_amplitudes.max(0.0))
-            .max(0.0);
-        }
-        self.atmosphere_height.max(0.0)
+        self.planet_radius.max(1.0) * self.atmosphere_height.max(0.0)
     }
 
     fn project_max_lod_cap() -> u8 {
@@ -357,6 +360,65 @@ impl PlanetRoot {
                 atmosphere.set_transform(atmosphere_transform);
             }
         }
+    }
+
+    fn sync_runtime_scale_bootstrap(&mut self) {
+        let spawn_distance = self.runtime_player_spawn_distance();
+
+        let child_count = self.base().get_child_count();
+        for child_index in 0..child_count {
+            let Some(child) = self.base().get_child(child_index) else {
+                continue;
+            };
+            let Ok(mut player) = child.try_cast::<CharacterBody3D>() else {
+                continue;
+            };
+
+            let mut player_transform = player.get_transform();
+            player_transform.origin = Vector3::new(0.0, 0.0, spawn_distance as f32);
+            player.set_transform(player_transform);
+            player.reset_physics_interpolation();
+            break;
+        }
+    }
+
+    fn sync_runtime_camera_clip_bootstrap(&mut self) {
+        if self.runtime_camera_clip_bootstrapped {
+            return;
+        }
+
+        let Some(mut camera) = self.active_camera_3d() else {
+            return;
+        };
+
+        // Keep the far plane close to the actual startup view volume so large
+        // worlds do not pay unnecessary precision loss on the first frame.
+        let target_far = self.runtime_camera_far_clip() as f32;
+        if camera.get_far() < target_far {
+            camera.set_far(target_far);
+        }
+        self.runtime_camera_clip_bootstrapped = true;
+    }
+
+    fn runtime_player_spawn_distance(&self) -> f64 {
+        let radius = self.planet_radius.max(1.0);
+        let atmosphere_height = self.effective_atmosphere_height();
+        let safety_margin = (radius * DEFAULT_DEBUG_PLAYER_SPAWN_MARGIN_RADIUS_SCALE)
+            .max(self.terrain_height_amplitude.max(0.0) * 4.0)
+            .max(DEFAULT_DEBUG_PLAYER_SPAWN_MARGIN);
+        radius + atmosphere_height + safety_margin
+    }
+
+    fn runtime_camera_far_clip(&self) -> f64 {
+        let radius = self.planet_radius.max(1.0);
+        let atmosphere_height = self.effective_atmosphere_height();
+        (self.runtime_player_spawn_distance() + radius + atmosphere_height)
+            .max(DEFAULT_DEBUG_CAMERA_FAR_CLIP_MIN)
+    }
+
+    fn active_camera_3d(&self) -> Option<Gd<Camera3D>> {
+        let viewport = self.base().get_viewport()?;
+        viewport.get_camera_3d()
     }
 
     fn first_directional_light_transform(&self) -> Option<Transform3D> {
@@ -546,6 +608,11 @@ impl PlanetRoot {
     }
 
     #[func]
+    fn runtime_sparse_meta_count(&self) -> i64 {
+        self.runtime.sparse_meta_count() as i64
+    }
+
+    #[func]
     fn runtime_rid_state_count(&self) -> i64 {
         self.runtime.rid_state_count() as i64
     }
@@ -553,6 +620,11 @@ impl PlanetRoot {
     #[func]
     fn metadata_precompute_max_lod(&self) -> i64 {
         self.runtime.metadata_precompute_max_lod() as i64
+    }
+
+    #[func]
+    fn dense_metadata_prebuild_max_lod(&self) -> i64 {
+        self.runtime.dense_metadata_prebuild_max_lod() as i64
     }
 
     #[func]

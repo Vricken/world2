@@ -47,6 +47,7 @@ pub use strategy::*;
 /// Treat Rust->Godot packed-array transfer as copy-possible unless the docs
 /// explicitly guarantee a zero-copy ownership handoff for the exact API used.
 pub const DEFAULT_METADATA_PRECOMPUTE_MAX_LOD: u8 = 5;
+pub const DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD: u8 = 8;
 pub const PAYLOAD_PRECOMPUTE_MAX_LOD: u8 = 5;
 pub const DEFAULT_SPLIT_THRESHOLD_PX: f32 = 8.0;
 pub const DEFAULT_MERGE_THRESHOLD_PX: f32 = 4.0;

@@ -342,25 +342,45 @@ impl StoredChunkMeta {
 
 #[derive(Clone, Debug)]
 pub struct MetadataStore {
-    levels: Vec<[Vec<Option<StoredChunkMeta>>; 6]>,
+    dense_max_lod: u8,
+    dense_levels: Vec<[Vec<Option<StoredChunkMeta>>; 6]>,
+    sparse_levels: HashMap<ChunkKey, StoredChunkMeta>,
     len: usize,
 }
 
 impl MetadataStore {
-    pub fn new(max_lod: u8) -> Self {
-        let level_count = usize::from(max_lod) + 1;
-        let levels = (0..level_count)
+    pub fn new(runtime_max_lod: u8, dense_max_lod: u8) -> Self {
+        let dense_max_lod = dense_max_lod.min(runtime_max_lod);
+        let level_count = usize::from(dense_max_lod) + 1;
+        let dense_levels = (0..level_count)
             .map(|_| std::array::from_fn(|_| Vec::new()))
             .collect();
-        Self { levels, len: 0 }
+        Self {
+            dense_max_lod,
+            dense_levels,
+            sparse_levels: HashMap::new(),
+            len: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
         self.len
     }
 
+    pub fn dense_max_lod(&self) -> u8 {
+        self.dense_max_lod
+    }
+
+    pub fn sparse_count(&self) -> usize {
+        self.sparse_levels.len()
+    }
+
     pub fn level_is_built(&self, lod: u8) -> bool {
-        self.levels
+        if !self.is_dense_lod(lod) {
+            return false;
+        }
+
+        self.dense_levels
             .get(usize::from(lod))
             .map(|faces| faces.iter().all(|entries| !entries.is_empty()))
             .unwrap_or(false)
@@ -399,22 +419,34 @@ impl MetadataStore {
             meta.refresh_same_lod_neighbors()?;
         }
 
-        let (lod_index, face_index, slot_index, slot_count) = self
-            .slot_components(&meta.key)
-            .ok_or(TopologyError::InvalidChunkKey)?;
-        let face_slots = &mut self.levels[lod_index][face_index];
-        if face_slots.is_empty() {
-            face_slots.resize(slot_count, None);
-        }
+        if self.is_dense_lod(meta.key.lod) {
+            let (lod_index, face_index, slot_index, slot_count) =
+                self.slot_components(&meta.key)
+                    .ok_or(TopologyError::InvalidChunkKey)?;
+            let face_slots = &mut self.dense_levels[lod_index][face_index];
+            if face_slots.is_empty() {
+                face_slots.resize(slot_count, None);
+            }
 
-        let previous = face_slots[slot_index]
-            .replace(StoredChunkMeta::from_chunk_meta(&meta))
-            .map(|stored| stored.to_chunk_meta(meta.key, meta.surface_class.clone()))
-            .transpose()?;
-        if previous.is_none() {
-            self.len += 1;
+            let previous = face_slots[slot_index]
+                .replace(StoredChunkMeta::from_chunk_meta(&meta))
+                .map(|stored| stored.to_chunk_meta(meta.key, meta.surface_class.clone()))
+                .transpose()?;
+            if previous.is_none() {
+                self.len += 1;
+            }
+            Ok(previous)
+        } else {
+            let previous = self
+                .sparse_levels
+                .insert(meta.key, StoredChunkMeta::from_chunk_meta(&meta))
+                .map(|stored| stored.to_chunk_meta(meta.key, meta.surface_class.clone()))
+                .transpose()?;
+            if previous.is_none() {
+                self.len += 1;
+            }
+            Ok(previous)
         }
-        Ok(previous)
     }
 
     pub(crate) fn set_face_level(
@@ -423,6 +455,10 @@ impl MetadataStore {
         lod: u8,
         entries: Vec<StoredChunkMeta>,
     ) -> Result<(), TopologyError> {
+        if !self.is_dense_lod(lod) {
+            return Err(TopologyError::InvalidChunkKey);
+        }
+
         let slot_count = self.face_slot_count(lod);
         if entries.len() != slot_count {
             return Err(TopologyError::InvalidChunkKey);
@@ -430,23 +466,31 @@ impl MetadataStore {
 
         let lod_index = usize::from(lod);
         let face_index = Self::face_index(face);
-        let previous_count = self.levels[lod_index][face_index]
+        let previous_count = self.dense_levels[lod_index][face_index]
             .iter()
             .filter(|entry| entry.is_some())
             .count();
         self.len = self.len.saturating_sub(previous_count);
         self.len += entries.len();
-        self.levels[lod_index][face_index] = entries.into_iter().map(Some).collect();
+        self.dense_levels[lod_index][face_index] = entries.into_iter().map(Some).collect();
         Ok(())
     }
 
     fn get_stored(&self, key: &ChunkKey) -> Option<&StoredChunkMeta> {
-        let (lod_index, face_index, slot_index, _) = self.slot_components(key)?;
-        self.levels
-            .get(lod_index)?
-            .get(face_index)?
-            .get(slot_index)?
-            .as_ref()
+        if self.is_dense_lod(key.lod) {
+            let (lod_index, face_index, slot_index, _) = self.slot_components(key)?;
+            self.dense_levels
+                .get(lod_index)?
+                .get(face_index)?
+                .get(slot_index)?
+                .as_ref()
+        } else {
+            self.sparse_levels.get(key)
+        }
+    }
+
+    fn is_dense_lod(&self, lod: u8) -> bool {
+        lod <= self.dense_max_lod
     }
 
     fn slot_components(&self, key: &ChunkKey) -> Option<(usize, usize, usize, usize)> {
@@ -882,6 +926,7 @@ pub struct RuntimeConfig {
     pub max_lod: u8,
     pub max_lod_cap: u8,
     pub metadata_precompute_max_lod: u8,
+    pub dense_metadata_prebuild_max_lod: u8,
     pub payload_precompute_max_lod: u8,
     pub worker_thread_count: usize,
     pub planet_seed: u64,
@@ -930,7 +975,9 @@ impl RuntimeConfig {
             ),
             MaxLodPolicyKind::Fixed => self.max_lod.min(self.max_lod_cap),
         };
-        self.metadata_precompute_max_lod = self.max_lod;
+        self.metadata_precompute_max_lod = self.metadata_precompute_max_lod.min(self.max_lod);
+        self.dense_metadata_prebuild_max_lod =
+            self.dense_metadata_prebuild_max_lod.min(self.max_lod);
         self.payload_precompute_max_lod = self.payload_precompute_max_lod.min(self.max_lod);
         self
     }
@@ -952,7 +999,8 @@ impl Default for RuntimeConfig {
             max_lod_policy: MaxLodPolicyKind::RadiusDerived,
             max_lod,
             max_lod_cap: topology::DEFAULT_MAX_LOD,
-            metadata_precompute_max_lod: max_lod,
+            metadata_precompute_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD.min(max_lod),
+            dense_metadata_prebuild_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD.min(max_lod),
             payload_precompute_max_lod: PAYLOAD_PRECOMPUTE_MAX_LOD.min(max_lod),
             worker_thread_count,
             planet_seed: DEFAULT_PLANET_SEED,

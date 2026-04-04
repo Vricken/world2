@@ -20,14 +20,15 @@ Implemented on 2026-03-23 in:
 What shipped:
 
 - Explicit Phase 13 default constants now anchor the runtime config for radius-derived LOD, payload precompute scope, split/merge hysteresis, horizon slack, physics activation radius, commit/upload budgets, and per-kind render/physics commit caps.
-- Runtime `max_lod` now respects a Project Settings-backed cap at `world2/runtime/max_lod_cap`, which defaults to `10` in-editor, is now seeded directly in `project.godot` for visibility, and still leaves topology support through LOD `16` for larger planets.
-- Metadata residency now defaults to prebuilding through the effective runtime `max_lod`, and the resident metadata set is stored in dense compact slabs with cached same-LOD neighbors rather than a `HashMap<ChunkKey, ChunkMeta>`.
+- Runtime `max_lod` now respects a Project Settings-backed cap at `world2/runtime/max_lod_cap`, which is now seeded directly in `project.godot` as `16` for visibility and still leaves topology support through LOD `16` for larger planets.
+- Metadata residency now uses a hybrid store: dense compact slabs with cached same-LOD neighbors through a bounded dense startup tier, plus sparse `HashMap<ChunkKey, StoredChunkMeta>` residency above that tier so very large planets do not allocate whole-planet metadata up front.
 - Budgeted diff application already defers render and physics work when total commit count, upload bytes, or per-kind caps are exceeded, now precomputes deactivation coverage blockers instead of rescanning the desired sets per op, and keeps starvation counters visible in `SelectionFrameState` and `PlanetRoot` logs.
 - Render and physics pool reuse remain bounded, with the default physics pool watermark tightened to `4` so collision pooling stays more conservative than the render per-class watermark of `8`.
 - Worker-thread startup remains clamped to a small bounded count, and Phase 13 regression coverage now checks that the documented starting values and worker-count alignment stay explicit in code.
-- `PlanetRoot` now exposes `planet_radius`, `terrain_height_amplitude`, `atmosphere_height`, `atmosphere_height_follows_terrain_scale`, `atmosphere_height_in_height_amplitudes`, `frustum_culling_enabled`, and `keep_coarse_lod_chunks_rendered` in the inspector, keeps the `PlanetAtmosphere` child synced to the current radius and effective atmosphere thickness in both tool mode and runtime, and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
+- `PlanetRoot` now exposes `planet_radius`, `terrain_height_amplitude`, `atmosphere_height` as a planet-radius fraction, `frustum_culling_enabled`, and `keep_coarse_lod_chunks_rendered` in the inspector, keeps the `PlanetAtmosphere` child synced to the current radius and effective atmosphere thickness in both tool mode and runtime, and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
+- `PlanetRoot` now also derives the debug-player bootstrap distance from the configured planet scale at runtime and raises the camera far clip only to a conservative startup-view minimum after the viewport has a live current camera, and the repository ships an inherited `scenes/main_300km.tscn` scene for headless large-planet boot validation.
 - The vendored `extremely_fast_atmosphere` shader now anchors its direction-profile lookup to a planet-space sample along the view ray instead of the camera-facing outer shell entry point, so the terminator and twilight colors remain fixed on the planet during orbital fly-bys without adding raymarching or per-pixel loops.
-- The default `MainCamera` far clip now ships at `100000.0`, which is `25x` the Godot `Camera3D.far` default of `4000.0` and leaves more headroom for the atmosphere shader's depth-limited sky pass on a `planet_radius = 10000` world.
+- The default `MainCamera` far clip now ships at `100000.0`, which is `25x` the Godot `Camera3D.far` default of `4000.0` and leaves more headroom for the atmosphere shader's depth-limited sky pass on a `planet_radius = 10000` world, while larger runtime worlds now cap their bootstrap far clip to the actual initial view volume instead of multiplying the whole-planet scale by an arbitrary large constant.
 
 ## Documentation Checked Before Implementation
 
@@ -48,13 +49,19 @@ Checked on 2026-04-03:
 - Godot stable `Spatial shaders` docs for the view-space meaning of `VIEW`, `VERTEX`, `MODELVIEW_MATRIX`, `INV_VIEW_MATRIX`, `NODE_POSITION_WORLD`, and `CAMERA_POSITION_WORLD`.
 - godot-rust `Node3D` API docs to confirm the existing transform sync path remained compatible while the atmosphere fix stayed shader-local.
 
+Checked on 2026-04-04:
+
+- Godot stable `Camera3D` docs for `current` camera selection and the documented `far` culling boundary semantics.
+- godot-rust `Camera3D` API docs for the `get_far()` and `set_far()` binding behavior used by the runtime bootstrap.
+
 Constraints carried into code:
 
 - Phase 13 changes runtime limits and pool defaults, not the documented server ownership model from Phases 08-12.
 - Pool reuse must stay bounded and measurable; defaults should enforce conservative free behavior rather than allow quiet RID growth.
 - Worker scratch ownership remains one reusable scratch set per worker thread rather than a shared mutable pool.
 - Tool-time scene helpers still need a stable scene-tree owner when they are created dynamically, and editor-facing controls should remain exported on `PlanetRoot` rather than hidden behind child-scene manual edits.
-- Atmosphere thickness should track the project's fake terrain vertical scale when desired; visual shell tuning is not always well served by real-planet radius ratios.
+- Atmosphere thickness now scales directly from planet radius, with the shipped default set to `20%` of radius so authored shells stay proportional across scene sizes.
+- Camera bootstrap should only mutate a live `Viewport` current camera, and the startup far clip should stay conservative because Godot's `Camera3D.far` is a culling boundary whose larger values trade away depth precision.
 - Disabling frustum culling only bypasses the runtime frustum-plane rejection; horizon culling, projected-error LOD selection, and budgeted commit behavior remain unchanged.
 - Coarse fallback coverage must stay selector-driven and server-managed; the runtime still does not create per-chunk scene-tree nodes.
 - The atmosphere fix should stay in the existing single-pass shader path; avoid introducing raymarching, loops, or extra scene nodes for a terminator-anchoring issue.
@@ -77,11 +84,12 @@ These defaults are not final tuning values. They are stable starting points that
 
 ```text
 MAX_LOD                         = radius-derived from planet_radius
-MAX_LOD_CAP_PROJECT_SETTING     = 10
+MAX_LOD_CAP_PROJECT_SETTING     = 16
 MIN_AVG_CHUNK_SURFACE_SPAN      = 32.0 m
 TOPOLOGY_SUPPORTED_MAX_LOD      = 16
+METADATA_PRECOMPUTE_MAX_LOD     = caller clamp, default 8
+DENSE_METADATA_PREBUILD_MAX_LOD = 8
 PAYLOAD_PRECOMPUTE_MAX_LOD      = 5
-METADATA_PRECOMPUTE_MAX_LOD     = runtime MAX_LOD by default
 QUADS_PER_EDGE                  = 32
 SAMPLED_EDGE                    = 35   // 33 visible + 2 border
 SPLIT_THRESHOLD_PX              = 8
@@ -102,20 +110,22 @@ PHYSICS_DEACTIVATIONS_PER_FRAME = 4
 POOL_WATERMARK_PER_CLASS        = 8 per surface class
 PHYSICS_POOL_WATERMARK          = 4
 WORKER_SCRATCH_COUNT            = one reusable scratch set per worker
-MAIN_CAMERA_FAR_CLIP            = 100000.0
+MAIN_CAMERA_FAR_CLIP            = max(100000.0, runtime_player_spawn_distance + planet_radius * (1.0 + atmosphere_height))
 ```
 
 Why these are good starting values:
 
 - radius-derived `max_lod` avoids tiny finest chunks on small planets and sharply reduces active-chunk churn near the surface
-- the editor-facing cap stays explicit and easy to tune per project without recompiling Rust, while still leaving headroom above the shipped default for larger planets
+- the editor-facing cap stays explicit and easy to tune per project without recompiling Rust, while the shipped `16` default no longer blocks 300 km test worlds before runtime selection can even run
 - `planet_radius = 1000` now resolves to `max_lod = 5`, which keeps average finest-chunk surface span around `45.2 m`
-- the default metadata prebuild window now follows that effective `max_lod`, so a `planet_radius = 1000` world still prebuilds only through LOD `5`, while larger planets no longer depend on runtime metadata misses during traversal
+- the default dense metadata prebuild tier now caps whole-planet startup residency at LOD `8`, so a `planet_radius = 1000` world still prebuilds only through LOD `5`, a `planet_radius = 10000` world still prebuilds through its full LOD `8`, and larger planets spill into sparse async metadata instead of blocking on whole-planet allocation
 - even if `world2/runtime/max_lod_cap` is raised above `10`, a `planet_radius = 1000` world still stays at `max_lod = 5` because the radius-derived target is reached before the cap
 - `32` quads keeps index buffers small and reusable
 - `33` visible vertices support stable normals/materials
 - border ring resolves most seam/shading issues early
 - 16 stitch index variants stay operationally manageable
+- a radius-relative atmosphere height keeps the shell visually proportional when planet scale changes, including the 300 km validation scene
+- the runtime camera bootstrap now targets only the distance needed to see the startup shell and opposite hemisphere, instead of inflating the far plane by a large whole-planet multiplier that hurts precision on large worlds
 
 New explicit controls:
 
@@ -129,6 +139,7 @@ New explicit controls:
 - per-kind render/physics commit budgets
 - `PHYSICS_POOL_WATERMARK`
 - `WORKER_SCRATCH_COUNT`
+- `DENSE_METADATA_PREBUILD_MAX_LOD`
 
 Together with pool watermarks, these establish back-pressure behavior:
 
@@ -143,11 +154,12 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Enforce pool watermarks with controlled free behavior.
 - [x] Keep physics watermark lower than render watermark.
 - [x] Keep worker scratch pool count aligned to worker count.
+- [x] Bound dense startup metadata residency independently from runtime `max_lod`.
 - [x] Keep payload precompute window capped at LOD 5 unless profiling justifies change.
 - [x] Delay resolution increases until profiling evidence exists.
 - [x] Expose the project-wide `max_lod` cap in the Godot editor instead of hardcoding it in Rust only.
 - [x] Expose the planet radius on `PlanetRoot` and show a matching editor preview sphere.
-- [x] Expose atmosphere height on `PlanetRoot` and keep the authored atmosphere shell synced to the current planet size and fake terrain vertical scale.
+- [x] Expose atmosphere height on `PlanetRoot` and keep the authored atmosphere shell synced to the current planet size through a radius-relative default.
 - [x] Expose `PlanetRoot` toggles for frustum culling and coarse fallback chunk coverage.
 
 ## Prerequisites
@@ -168,6 +180,7 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Budget saturation defers work instead of frame spikes.
 - [x] Pool sizes remain bounded under camera churn.
 - [x] Runtime remains stable with default values under representative traversal.
+- [x] Large-radius startup no longer blocks on whole-planet metadata allocation before the first frame.
 - [x] Tool-mode `PlanetRoot` can initialize in editor context without panicking while registering the custom project setting.
 
 ## Definition of Done
@@ -177,17 +190,21 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Any deviations from defaults are justified by profiling notes.
 - [x] Default runtime `max_lod` no longer produces sub-32-meter average finest chunks on small planets.
 - [x] Planet size, atmosphere shell size, coarse-coverage behavior, frustum-culling behavior, and the global LOD cap are visible/editable from the Godot editor.
+- [x] Startup metadata residency remains bounded for very large planets without lowering the runtime detail target.
 
 ## Test Record
 
 - [x] Date: 2026-03-23
-- [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage still intact after adding the `PlanetRoot.atmosphere_height` inspector property and syncing the authored `PlanetAtmosphere` shell to `planet_radius` at tool time and runtime. The default `planet_radius = 1000` profile still resolves to `max_lod = 5`, keeps frustum culling on by default, leaves coarse fallback off by default, and now exposes the atmosphere shell thickness from the same root inspector that owns planet size.
+- [x] Result summary: `cargo test` passed with the Phase 13 default-number coverage still intact after keeping `PlanetRoot.atmosphere_height` as the single inspector property for shell sizing, now interpreted as a planet-radius fraction with a shipped default of `0.2`. The default `planet_radius = 1000` profile still resolves to `max_lod = 5`, keeps frustum culling on by default, leaves coarse fallback off by default, and now scales the atmosphere shell proportionally with planet size.
 - [x] Profiles and scenarios tested: unit tests covering the documented default numbers, frustum-bypass behavior, coarse-root fallback behavior, cap behavior, budget saturation, physics-set limits, and pool watermark enforcement; `./scripts/build_rust.sh` completed successfully; `cargo test` passed (`65` tests); `./scripts/run_godot.sh --headless --quit-after 2` loaded the extension and main scene with the vendored `extremely_fast_atmosphere` shell attached, reporting `strategy_summary=projection=spherified_cube visibility=horizon_frustum_lod frustum_culling=true coarse_lod_fallback=false render_backend=server_pool_render_backend staging=godot_owned_packed_byte_array` on startup without the earlier atmosphere-parenting or `look_at()` warnings.
 - [x] Follow-up actions: if coarse fallback is enabled in production, capture a moving-camera trace to measure the extra overlapping residency against the reduced risk of transient empty coverage during rapid camera motion.
 - [x] Date: 2026-04-03
-- [x] Result summary: the atmosphere direction lookup now samples a planet-anchored point along the view ray, so the day/night split no longer slides toward the camera-facing shell during fly-bys. This preserves the plugin's texture-driven single-pass structure and avoids a larger atmosphere rewrite.
-- [x] Profiles and scenarios tested: `cargo test`; `./scripts/build_rust.sh`; `./scripts/run_godot.sh --headless --quit-after 2`.
-- [x] Deviations from the earlier phase note: the scene currently ships with `atmosphere_height = 2000.0`, not the older `350.0` value previously mentioned in the root README.
+- [x] Result summary: startup metadata residency now stays bounded through a dense LOD-8 tier plus sparse async high-LOD metadata, so a `planet_radius = 300000` world reaches runtime startup without blocking on whole-planet metadata allocation. The sample scene bootstrap now derives player spawn distance and camera far clip from planet scale, and an inherited `main_300km.tscn` scene is available for large-planet validation.
+- [x] Profiles and scenarios tested: `cargo test`; `./scripts/build_rust.sh`; `./scripts/run_godot.sh --headless --quit-after 2`; `./scripts/run_godot.sh --headless res://scenes/main_300km.tscn --quit-after 2`.
+- [x] Deviations from the earlier phase note: `payload_precompute_max_lod` still exists in `RuntimeConfig`, but the shipped runtime does not eagerly precompute whole-planet payloads from it; the field is now documented as legacy/internal until a future pass repurposes or removes it.
+- [x] Date: 2026-04-04
+- [x] Result summary: after a live regression on the 100 km sample scene, the startup camera bootstrap was tightened so `PlanetRoot` no longer mutates camera clip distance in `ready()`, and the runtime far clip heuristic now grows only to cover the initial spawn shell and opposite hemisphere instead of scaling by a `10x` whole-planet multiplier that caused renderer instability.
+- [x] Profiles and scenarios tested: `cargo test`; `./scripts/build_rust.sh`; scripted non-headless startup log check on `res://scenes/main.tscn`.
 
 ## References
 

@@ -1,6 +1,8 @@
 use super::super::*;
 
 const METADATA_SAMPLE_GRID_EDGE: u32 = 5;
+const MAX_NEIGHBOR_NORMALIZATION_PASSES_PER_FRAME: usize = 64;
+const MAX_NEIGHBOR_NORMALIZATION_WORK_ITEMS_PER_FRAME: usize = 16_384;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SelectionFrameState {
@@ -34,6 +36,8 @@ pub struct SelectionFrameState {
     pub phase8_fallback_incompatible_current_surface_class: usize,
     pub phase8_fallback_no_compatible_pooled_surface: usize,
     pub phase9_worker_threads: usize,
+    pub phase9_meta_requests_submitted: usize,
+    pub phase9_meta_results_installed: usize,
     pub phase9_submitted_jobs: usize,
     pub phase9_generation_jobs: usize,
     pub phase9_ready_results: usize,
@@ -55,6 +59,7 @@ pub struct SelectionFrameState {
     pub phase12_asset_accepted_count: usize,
     pub phase12_active_groups: usize,
     pub phase12_active_instances: usize,
+    pub sparse_meta_entries: usize,
     pub render_pool_entries: usize,
     pub physics_pool_entries: usize,
 }
@@ -104,7 +109,7 @@ impl PlanetRuntime {
         self.pending_origin_rebases = 0;
         self.pending_render_transform_rebinds = 0;
         self.pending_physics_transform_rebinds = 0;
-        self.drain_ready_chunk_meta();
+        frame_state.phase9_meta_results_installed = self.drain_ready_chunk_meta();
         if self.origin_shift_pending_rebind {
             frame_state.phase10_origin_rebases += 1;
             self.rebind_active_relative_transforms(&mut frame_state);
@@ -117,12 +122,14 @@ impl PlanetRuntime {
         frame_state.desired_physics_count = desired_physics.len();
 
         self.apply_budgeted_diffs(&desired_render, &desired_physics, camera, &mut frame_state)?;
+        frame_state.sparse_meta_entries = self.meta.sparse_count();
         self.frame_state = frame_state;
 
         Ok(())
     }
 
-    pub(crate) fn drain_ready_chunk_meta(&mut self) {
+    pub(crate) fn drain_ready_chunk_meta(&mut self) -> usize {
+        let mut installed = 0usize;
         for prepared in self.threaded_metadata_generator.drain_ready() {
             let Some(expected_epoch) = self.pending_meta_requests.get(&prepared.key).copied()
             else {
@@ -133,10 +140,16 @@ impl PlanetRuntime {
             }
             self.pending_meta_requests.remove(&prepared.key);
             let _ = self.meta.insert_chunk_meta(prepared.meta, true);
+            installed += 1;
         }
+        installed
     }
 
-    pub(crate) fn request_chunk_meta_if_missing(&mut self, key: ChunkKey) {
+    pub(crate) fn request_chunk_meta_if_missing(
+        &mut self,
+        key: ChunkKey,
+        frame_state: &mut SelectionFrameState,
+    ) {
         if self.meta.contains_key(&key) || self.pending_meta_requests.contains_key(&key) {
             return;
         }
@@ -150,6 +163,7 @@ impl PlanetRuntime {
                 key,
                 config: self.config.clone(),
             });
+        frame_state.phase9_meta_requests_submitted += 1;
     }
 
     pub(crate) fn build_chunk_meta(&self, key: ChunkKey) -> Result<ChunkMeta, TopologyError> {
@@ -490,7 +504,8 @@ impl PlanetRuntime {
             }
         }
 
-        frame_state.neighbor_split_count = self.normalize_neighbor_lod_delta(&mut selected)?;
+        frame_state.neighbor_split_count =
+            self.normalize_neighbor_lod_delta(&mut selected, frame_state)?;
         frame_state.selected_leaf_count = selected.len();
 
         Ok(selected)
@@ -527,7 +542,7 @@ impl PlanetRuntime {
             let mut all_children_ready = true;
             for child in children.iter().copied() {
                 if !self.meta.contains_key(&child) {
-                    self.request_chunk_meta_if_missing(child);
+                    self.request_chunk_meta_if_missing(child, frame_state);
                     all_children_ready = false;
                 }
             }
@@ -600,10 +615,34 @@ impl PlanetRuntime {
     pub(crate) fn normalize_neighbor_lod_delta(
         &mut self,
         selected: &mut HashSet<ChunkKey>,
+        frame_state: &mut SelectionFrameState,
+    ) -> Result<usize, TopologyError> {
+        self.normalize_neighbor_lod_delta_with_limits(
+            selected,
+            frame_state,
+            MAX_NEIGHBOR_NORMALIZATION_PASSES_PER_FRAME,
+            MAX_NEIGHBOR_NORMALIZATION_WORK_ITEMS_PER_FRAME,
+        )
+    }
+
+    pub(crate) fn normalize_neighbor_lod_delta_with_limits(
+        &mut self,
+        selected: &mut HashSet<ChunkKey>,
+        frame_state: &mut SelectionFrameState,
+        max_passes: usize,
+        max_work_items: usize,
     ) -> Result<usize, TopologyError> {
         let mut splits_applied = 0usize;
+        let mut seen_states = HashSet::new();
+        let mut work_items = 0usize;
 
-        loop {
+        for _ in 0..max_passes {
+            let state = Self::normalized_selection_state(selected);
+            if !seen_states.insert(state) {
+                self.force_collapse_neighbor_lod_delta(selected)?;
+                return Ok(splits_applied);
+            }
+
             let mut split_targets = HashSet::new();
             let mut collapse_targets = HashSet::new();
 
@@ -613,6 +652,11 @@ impl PlanetRuntime {
                     .neighbors(&key)
                     .unwrap_or(topology::same_lod_neighbors(key)?);
                 for neighbor_same_lod in neighbors.same_lod {
+                    work_items = work_items.saturating_add(1);
+                    if work_items > max_work_items {
+                        self.force_collapse_neighbor_lod_delta(selected)?;
+                        return Ok(splits_applied);
+                    }
                     if let Some(active_ancestor) =
                         Self::find_active_ancestor_covering(neighbor_same_lod, selected)
                     {
@@ -623,7 +667,7 @@ impl PlanetRuntime {
                             let mut coarse_children_ready = true;
                             for child in coarse_children {
                                 if !self.meta.contains_key(&child) {
-                                    self.request_chunk_meta_if_missing(child);
+                                    self.request_chunk_meta_if_missing(child, frame_state);
                                     coarse_children_ready = false;
                                 }
                             }
@@ -658,7 +702,7 @@ impl PlanetRuntime {
                     if self.meta.contains_key(&child) {
                         selected.insert(child);
                     } else {
-                        self.request_chunk_meta_if_missing(child);
+                        self.request_chunk_meta_if_missing(child, frame_state);
                         all_children_ready = false;
                     }
                 }
@@ -688,10 +732,11 @@ impl PlanetRuntime {
             }
 
             if !progressed_this_pass {
-                break;
+                return Ok(splits_applied);
             }
         }
 
+        self.force_collapse_neighbor_lod_delta(selected)?;
         Ok(splits_applied)
     }
 
@@ -706,6 +751,81 @@ impl PlanetRuntime {
 
             key = key.parent()?;
         }
+    }
+
+    fn collect_neighbor_collapse_targets(
+        &self,
+        selected: &HashSet<ChunkKey>,
+    ) -> Result<HashSet<ChunkKey>, TopologyError> {
+        let mut collapse_targets = HashSet::new();
+
+        for key in selected.iter().copied().collect::<Vec<_>>() {
+            let neighbors = self
+                .meta
+                .neighbors(&key)
+                .unwrap_or(topology::same_lod_neighbors(key)?);
+            for neighbor_same_lod in neighbors.same_lod {
+                if let Some(active_ancestor) =
+                    Self::find_active_ancestor_covering(neighbor_same_lod, selected)
+                {
+                    if key.lod > active_ancestor.lod + 1 {
+                        if let Some(collapse_target) = key.ancestor_at_lod(active_ancestor.lod + 1)
+                        {
+                            collapse_targets.insert(collapse_target);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(collapse_targets)
+    }
+
+    fn force_collapse_neighbor_lod_delta(
+        &self,
+        selected: &mut HashSet<ChunkKey>,
+    ) -> Result<(), TopologyError> {
+        loop {
+            let collapse_targets = self.collect_neighbor_collapse_targets(selected)?;
+            if collapse_targets.is_empty() {
+                return Ok(());
+            }
+
+            let mut progressed_this_pass = false;
+            for collapse_target in collapse_targets {
+                progressed_this_pass |=
+                    Self::collapse_selected_descendants(selected, collapse_target);
+            }
+
+            if !progressed_this_pass {
+                return Ok(());
+            }
+        }
+    }
+
+    fn collapse_selected_descendants(
+        selected: &mut HashSet<ChunkKey>,
+        collapse_target: ChunkKey,
+    ) -> bool {
+        let descendants = selected
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.is_descendant_of(&collapse_target))
+            .collect::<Vec<_>>();
+        if descendants.is_empty() {
+            return false;
+        }
+
+        for descendant in descendants {
+            selected.remove(&descendant);
+        }
+        selected.insert(collapse_target)
+    }
+
+    fn normalized_selection_state(selected: &HashSet<ChunkKey>) -> Vec<ChunkKey> {
+        let mut state = selected.iter().copied().collect::<Vec<_>>();
+        state.sort_unstable();
+        state
     }
 
     pub(crate) fn select_physics_set(

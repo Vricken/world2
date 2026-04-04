@@ -16,8 +16,9 @@ Implemented on 2026-03-21 in:
 What shipped:
 
 - A real runtime selector that runs in the required stage order: horizon -> frustum -> projected-error LOD -> neighbor normalization -> render/physics set diffing -> budgeted commit application.
-- Conservative chunk metadata generation for bounds, sampled per-chunk min/max height/radius, angular radius, geometric error, and default surface class, with startup prebuild through the configured window and async worker generation above that window.
+- Conservative chunk metadata generation for bounds, sampled per-chunk min/max height/radius, angular radius, geometric error, and default surface class, with bounded dense startup prebuild through the configured window and async worker generation into sparse residency above that window.
 - Split/merge hysteresis using `8 px` split and `4 px` merge thresholds.
+- Neighbor normalization now has both a bounded per-frame pass budget and a bounded per-frame neighbor-check work budget, plus a monotonic coarse-collapse fallback, so sparse-metadata churn cannot trap `_process()` inside either a non-converging loop or an oversized normalization pass.
 - Separate desired and committed render/physics active sets with near-camera physics caps and per-frame deferred-work metrics.
 - Commit-budget and upload-budget enforcement with per-kind throttles and starvation tracking for deferred work.
 - A no-visual-holes invariant on deactivation: render chunks now stay resident until intersecting desired replacement coverage is already active or has committed successfully in the current frame.
@@ -30,13 +31,16 @@ Checked on 2026-03-21:
 
 - Godot stable `Camera3D` docs for `get_camera_transform()` and `get_frustum()`.
 - Godot stable `Viewport` docs for active-camera lookup and viewport sizing behavior.
+- Godot stable `Node` docs for `_process()` ordering and per-frame callback behavior.
 - Godot stable performance docs for conservative culling guidance.
 - godot-rust API docs for `Camera3D`, `Viewport`, `Plane`, and `Transform3D` behavior used by the selector.
+- godot-rust `INode3D` docs for the `process()` virtual callback mapping used by `PlanetRoot`.
 
 Constraints carried into code:
 
 - Frustum planes are consumed exactly as exposed by `Camera3D.get_frustum()` instead of reconstructing undocumented camera internals.
 - Horizon culling stays Rust-side and runs before frustum/LOD work.
+- Because `PlanetRoot` selection runs from `_process()`, neighbor normalization must always return control to the engine within a bounded frame budget instead of relying on eventual convergence or on a single pass staying cheap.
 - Upload budgeting is modeled conservatively from surface-class byte counts because the real region-update path is still a later phase.
 
 ## Runtime Selection Pipeline
@@ -133,9 +137,10 @@ Because render/physics server object creation lands in later phases, this phase 
 
 ## Deviation Notes
 
-- The original phase wording implied precomputing metadata for every chunk through `MAX_LOD = 10`. The current implementation now prebuilds metadata through the effective runtime `max_lod`, using a dense compact metadata store instead of a hash map so the selector no longer depends on runtime metadata misses during normal traversal.
+- The original phase wording implied precomputing metadata for every chunk through `MAX_LOD = 10`. The current implementation now prebuilds only a bounded dense metadata tier, using dense compact slabs through that tier plus sparse high-LOD residency above it so the selector avoids whole-planet startup allocation on large planets while still supporting async metadata misses during traversal.
 - Physics residency still uses the active camera as the near-player proxy. The current maintenance pass sharply narrowed that bubble and added a hard active-chunk cap so close-to-surface traversal no longer activates most selected chunks for collision.
 - The 2026-03-22 maintenance pass reversed the earlier permissive defaults, restoring explicit back-pressure so visibility spikes turn into bounded streaming instead of `100 ms+` single-frame stalls.
+- Freeze investigations on 2026-04-03 and 2026-04-04 found two failure modes in the selector after high-speed sparse-metadata traversal: repeated-state normalization churn across passes and an oversized first normalization pass dominated by ancestor hash lookups. The current implementation now caps both normalization passes and normalization work items per frame and, if either guard trips, force-collapses the finer side until the `max neighbor LOD delta = 1` contract is satisfied.
 - The current streaming path now prefers temporary overlap over holes: old render or physics coverage may persist for extra frames while replacements are still in flight.
 - Full in-editor orbit stress testing is still a follow-up. This phase records the shipped headless validation plus unit-test coverage for selector behavior and budgeting.
 
@@ -167,6 +172,8 @@ Because render/physics server object creation lands in later phases, this phase 
 
 - [x] Default external camera rejects one root face through the horizon pass in headless validation.
 - [x] LOD transitions are stabilized by hysteresis rules and neighbor normalization in unit tests.
+- [x] Neighbor-normalization fallback still returns a `LOD delta <= 1` set when the iterative pass is forced to bail out.
+- [x] Neighbor-normalization fallback still returns a `LOD delta <= 1` set when the per-frame normalization work budget is exhausted mid-pass.
 - [x] Budget saturation defers lower-priority work instead of spiking frame in unit tests.
 - [x] Physics active set stays near-camera and not equal to render set in unit tests.
 - [x] Coverage-retirement guard keeps parent chunks alive until replacement coverage is ready in unit tests.
@@ -181,10 +188,10 @@ Because render/physics server object creation lands in later phases, this phase 
 
 ## Test Record
 
-- [x] Date: 2026-03-22
-- [x] Result summary: `cargo test` passed with `62/62` tests after the metadata-storage refactor. The selector/commit path now keeps render parents alive until desired replacement coverage is active, delays physics retirement slightly longer than render when needed, and starts with full metadata resident through runtime `max_lod` in the shipping path.
+- [x] Date: 2026-04-03
+- [x] Result summary: `cargo test` passed with `70/70` tests after the sparse-metadata maintenance pass. Neighbor normalization still splits the coarse side when metadata is ready, and now falls back to a bounded monotonic coarse collapse when either the iterative split/collapse pass repeats, the pass cap is exhausted, or the per-frame normalization work budget is exhausted, which prevents the selector from freezing `_process()` in one frame during high-speed traversal.
 - [x] Budget behavior notes: the tight-budget and per-kind budget unit tests confirm overflow work is deferred, render/physics activation spikes are capped independently, and starvation counters increment while work remains queued.
-- [x] Follow-up actions: re-profile a real fly-through with camera translation near the surface and verify that overlap-based retirement avoids visible holes without keeping too much stale coarse collision alive.
+- [x] Follow-up actions: re-profile a real fly-through with camera translation near the surface and verify that the new normalization fallback only appears as a transient coarsening guardrail, not as a visible long-lived LOD regression, while also checking whether the current work-budget threshold should be tuned upward or downward.
 
 ## References
 

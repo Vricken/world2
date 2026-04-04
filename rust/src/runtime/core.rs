@@ -9,7 +9,11 @@ impl Default for PlanetRuntime {
 impl PlanetRuntime {
     pub fn new(config: RuntimeConfig, scenario_rid: Rid, physics_space_rid: Rid) -> Self {
         let config = config.normalized();
-        let metadata_max_lod = config.max_lod;
+        let runtime_max_lod = config.max_lod;
+        let dense_metadata_max_lod = config
+            .metadata_precompute_max_lod
+            .min(config.dense_metadata_prebuild_max_lod)
+            .min(runtime_max_lod);
         let mut runtime = Self {
             threaded_payload_generator: ThreadedPayloadGenerator::new(config.worker_thread_count),
             threaded_metadata_generator: ThreadedMetadataGenerator::new(config.worker_thread_count),
@@ -18,7 +22,7 @@ impl PlanetRuntime {
             config,
             scenario_rid,
             physics_space_rid,
-            meta: MetadataStore::new(metadata_max_lod),
+            meta: MetadataStore::new(runtime_max_lod, dense_metadata_max_lod),
             active_render: HashSet::new(),
             active_physics: HashSet::new(),
             resident_payloads: HashMap::new(),
@@ -42,18 +46,17 @@ impl PlanetRuntime {
             pending_physics_transform_rebinds: 0,
         };
         runtime
-            .build_metadata_tree_through_lod(
-                runtime
-                    .config
-                    .metadata_precompute_max_lod
-                    .min(runtime.config.max_lod),
-            )
+            .build_metadata_tree_through_lod(dense_metadata_max_lod)
             .expect("phase 7 metadata prebuild keys must always be valid");
         runtime
     }
 
     pub fn metadata_precompute_max_lod(&self) -> u8 {
         self.config.metadata_precompute_max_lod
+    }
+
+    pub fn dense_metadata_prebuild_max_lod(&self) -> u8 {
+        self.config.dense_metadata_prebuild_max_lod
     }
 
     pub fn payload_precompute_max_lod(&self) -> u8 {
@@ -302,6 +305,10 @@ impl PlanetRuntime {
 
     pub fn meta_count(&self) -> usize {
         self.meta.len()
+    }
+
+    pub fn sparse_meta_count(&self) -> usize {
+        self.meta.sparse_count()
     }
 
     pub fn active_render_count(&self) -> usize {
