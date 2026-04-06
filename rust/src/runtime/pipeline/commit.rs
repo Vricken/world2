@@ -1194,7 +1194,7 @@ impl PlanetRuntime {
     pub(crate) fn projected_error_px(&self, camera: &CameraState, meta: &ChunkMeta) -> f32 {
         self.config
             .visibility_strategy
-            .screen_error_px(camera, meta)
+            .screen_error_px(&self.config, camera, meta)
     }
 
     pub(crate) fn chunk_camera_distance(&self, camera: &CameraState, meta: &ChunkMeta) -> f64 {

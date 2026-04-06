@@ -7,9 +7,7 @@ SCENE="res://scenes/profiling/perf_probe.tscn"
 SCENARIOS=(
   small_window
   fullscreen_native
-  fullscreen_fixed_lod
   fullscreen_native_no_atmosphere
-  fullscreen_fixed_lod_no_atmosphere
 )
 
 for scenario in "${SCENARIOS[@]}"; do

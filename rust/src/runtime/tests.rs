@@ -90,6 +90,8 @@ fn orbit_camera_state() -> CameraState {
         forward_planet: DVec3::new(0.0, 0.0, -1.0),
         frustum_planes: huge_test_frustum(),
         projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
     }
 }
@@ -100,6 +102,8 @@ fn near_surface_camera_state() -> CameraState {
         forward_planet: DVec3::new(0.0, 0.0, -1.0),
         frustum_planes: huge_test_frustum(),
         projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
     }
 }
@@ -410,6 +414,12 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     assert_eq!(config.metadata_precompute_max_lod, 5);
     assert!(config.enable_frustum_culling);
     assert!(!config.keep_coarse_lod_chunks_rendered);
+    assert_eq!(
+        config.render_lod_reference_height_px,
+        DEFAULT_RENDER_LOD_REFERENCE_HEIGHT_PX
+    );
+    assert_eq!(config.target_render_chunks, DEFAULT_TARGET_RENDER_CHUNKS);
+    assert_eq!(config.hard_render_chunk_cap, DEFAULT_HARD_RENDER_CHUNK_CAP);
     assert_eq!(config.split_threshold_px, DEFAULT_SPLIT_THRESHOLD_PX);
     assert_eq!(config.merge_threshold_px, DEFAULT_MERGE_THRESHOLD_PX);
     assert_eq!(config.horizon_safety_margin, DEFAULT_HORIZON_SAFETY_MARGIN);
@@ -587,8 +597,145 @@ fn phase15_visibility_strategy_matches_runtime_wrappers() {
     );
     assert_eq!(
         runtime.projected_error_px(&camera, &meta),
-        strategy.screen_error_px(&camera, &meta)
+        strategy.screen_error_px(&runtime.config, &camera, &meta)
     );
+}
+
+#[test]
+fn phase1_selection_is_invariant_to_viewport_height_changes() {
+    let config = RuntimeConfig {
+        max_lod_policy: MaxLodPolicyKind::Fixed,
+        max_lod: 2,
+        metadata_precompute_max_lod: 2,
+        dense_metadata_prebuild_max_lod: 2,
+        split_threshold_px: 0.0,
+        merge_threshold_px: 0.0,
+        enable_godot_staging: false,
+        ..RuntimeConfig::default()
+    };
+    let mut small_runtime = PlanetRuntime::new(config.clone(), Rid::Invalid, Rid::Invalid);
+    let mut fullscreen_runtime = PlanetRuntime::new(config, Rid::Invalid, Rid::Invalid);
+    let small_camera = CameraState {
+        position_planet: DVec3::new(0.0, 0.0, 500.0),
+        forward_planet: DVec3::new(0.0, 0.0, -1.0),
+        frustum_planes: huge_test_frustum(),
+        projection_scale: 600.0,
+        viewport_height_px: 600.0,
+        lod_reference_height_px_override: None,
+        origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
+    };
+    let fullscreen_camera = CameraState {
+        position_planet: small_camera.position_planet,
+        forward_planet: small_camera.forward_planet,
+        frustum_planes: small_camera.frustum_planes,
+        projection_scale: 2_400.0,
+        viewport_height_px: 2_400.0,
+        lod_reference_height_px_override: None,
+        origin: small_camera.origin,
+    };
+
+    let small = small_runtime
+        .select_render_set(&small_camera, &mut SelectionFrameState::default())
+        .unwrap();
+    let fullscreen = fullscreen_runtime
+        .select_render_set(&fullscreen_camera, &mut SelectionFrameState::default())
+        .unwrap();
+
+    assert_eq!(small, fullscreen);
+}
+
+#[test]
+fn phase1_best_first_refinement_prioritizes_the_highest_error_face_under_budget() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            max_lod_policy: MaxLodPolicyKind::Fixed,
+            max_lod: 2,
+            metadata_precompute_max_lod: 2,
+            dense_metadata_prebuild_max_lod: 2,
+            split_threshold_px: 0.0,
+            merge_threshold_px: 0.0,
+            target_render_chunks: 9,
+            hard_render_chunk_cap: 12,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera = CameraState {
+        position_planet: DVec3::new(0.0, 0.0, 500.0),
+        forward_planet: DVec3::new(0.0, 0.0, -1.0),
+        frustum_planes: huge_test_frustum(),
+        projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
+        origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
+    };
+    let mut frame_state = SelectionFrameState::default();
+
+    let selected = runtime
+        .select_render_set(&camera, &mut frame_state)
+        .unwrap();
+
+    assert!(selected.contains(&ChunkKey::new(Face::Pz, 1, 0, 0)));
+    assert!(selected.contains(&ChunkKey::new(Face::Pz, 1, 1, 0)));
+    assert!(selected.contains(&ChunkKey::new(Face::Pz, 1, 0, 1)));
+    assert!(selected.contains(&ChunkKey::new(Face::Pz, 1, 1, 1)));
+    assert!(selected.contains(&ChunkKey::new(Face::Px, 0, 0, 0)));
+    assert!(selected.contains(&ChunkKey::new(Face::Nx, 0, 0, 0)));
+    assert!(selected.contains(&ChunkKey::new(Face::Py, 0, 0, 0)));
+    assert!(selected.contains(&ChunkKey::new(Face::Ny, 0, 0, 0)));
+    assert!(selected.contains(&ChunkKey::new(Face::Nz, 0, 0, 0)));
+    assert_eq!(selected.len(), 9);
+    assert!(frame_state.selected_candidates > 0);
+    assert!(frame_state.refinement_iterations > 0);
+}
+
+#[test]
+fn phase1_hard_render_chunk_cap_bounds_refinement_and_normalization() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            max_lod_policy: MaxLodPolicyKind::Fixed,
+            max_lod: 3,
+            metadata_precompute_max_lod: 3,
+            dense_metadata_prebuild_max_lod: 3,
+            split_threshold_px: 0.0,
+            merge_threshold_px: 0.0,
+            target_render_chunks: 18,
+            hard_render_chunk_cap: 12,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera = CameraState {
+        position_planet: DVec3::new(0.0, 0.0, 500.0),
+        forward_planet: DVec3::new(0.0, 0.0, -1.0),
+        frustum_planes: huge_test_frustum(),
+        projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
+        origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
+    };
+    let mut frame_state = SelectionFrameState::default();
+
+    let selected = runtime
+        .select_render_set(&camera, &mut frame_state)
+        .unwrap();
+
+    assert!(selected.len() <= runtime.config.hard_render_chunk_cap);
+    assert!(frame_state.selection_cap_hits > 0);
+    for key in selected.iter().copied() {
+        for edge in Edge::ALL {
+            let neighbor_same_lod = topology::same_lod_neighbor(key, edge).unwrap();
+            if let Some(neighbor) =
+                PlanetRuntime::find_active_ancestor_covering(neighbor_same_lod, &selected)
+            {
+                assert!(key.lod.abs_diff(neighbor.lod) <= 1);
+            }
+        }
+    }
 }
 
 #[test]
@@ -655,6 +802,8 @@ fn sparse_metadata_streaming_keeps_parent_coverage_until_children_arrive() {
         forward_planet: DVec3::new(0.0, 0.0, -1.0),
         frustum_planes: box_test_frustum(Vector3::ZERO, 50_000.0),
         projection_scale: 40_000.0,
+        viewport_height_px: 40_000.0,
+        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, camera_position),
     };
     let mut frame_state = SelectionFrameState::default();
@@ -1317,6 +1466,8 @@ fn phase10_frustum_checks_use_render_relative_centers() {
         forward_planet: DVec3::new(0.0, 0.0, -1.0),
         frustum_planes: box_test_frustum(Vector3::ZERO, 1_000.0),
         projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
     };
     let shifted = CameraState {
@@ -1324,6 +1475,8 @@ fn phase10_frustum_checks_use_render_relative_centers() {
         forward_planet: DVec3::new(0.0, 0.0, -1.0),
         frustum_planes: box_test_frustum(Vector3::ZERO, 1_000.0),
         projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(
             &RuntimeConfig::default(),
             DVec3::new(50_000.0, 0.0, 0.0),
@@ -1363,6 +1516,8 @@ fn frustum_culling_can_be_disabled_in_runtime_config() {
         forward_planet: DVec3::new(0.0, 0.0, -1.0),
         frustum_planes: box_test_frustum(Vector3::ZERO, 100.0),
         projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
     };
 
@@ -1705,6 +1860,8 @@ fn coarse_lod_fallback_keeps_root_chunk_when_face_is_fully_culled() {
         forward_planet: DVec3::new(0.0, 0.0, -1.0),
         frustum_planes: box_test_frustum(Vector3::new(50_000.0, 50_000.0, 50_000.0), 100.0),
         projection_scale: 1_200.0,
+        viewport_height_px: 1_200.0,
+        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
     };
     let mut frame_state = SelectionFrameState::default();
@@ -1781,7 +1938,13 @@ fn neighbor_normalization_fallback_coarsens_to_keep_delta_bounded() {
     let mut frame_state = SelectionFrameState::default();
 
     let splits = runtime
-        .normalize_neighbor_lod_delta_with_limits(&mut selected, &mut frame_state, 0, usize::MAX)
+        .normalize_neighbor_lod_delta_with_limits(
+            &mut selected,
+            &mut frame_state,
+            0,
+            usize::MAX,
+            usize::MAX,
+        )
         .unwrap();
 
     assert_eq!(splits, 0);
@@ -1826,7 +1989,13 @@ fn neighbor_normalization_fallback_coarsens_when_work_budget_is_exhausted() {
     let mut frame_state = SelectionFrameState::default();
 
     let splits = runtime
-        .normalize_neighbor_lod_delta_with_limits(&mut selected, &mut frame_state, 64, 0)
+        .normalize_neighbor_lod_delta_with_limits(
+            &mut selected,
+            &mut frame_state,
+            64,
+            0,
+            usize::MAX,
+        )
         .unwrap();
 
     assert_eq!(splits, 0);

@@ -37,7 +37,12 @@ pub trait ChunkVisibilityStrategy {
         camera: &CameraState,
         meta: &ChunkMeta,
     ) -> bool;
-    fn screen_error_px(&self, camera: &CameraState, meta: &ChunkMeta) -> f32;
+    fn screen_error_px(
+        &self,
+        config: &RuntimeConfig,
+        camera: &CameraState,
+        meta: &ChunkMeta,
+    ) -> f32;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,9 +80,14 @@ impl ChunkVisibilityStrategy for VisibilityStrategyKind {
         }
     }
 
-    fn screen_error_px(&self, camera: &CameraState, meta: &ChunkMeta) -> f32 {
+    fn screen_error_px(
+        &self,
+        config: &RuntimeConfig,
+        camera: &CameraState,
+        meta: &ChunkMeta,
+    ) -> f32 {
         match self {
-            Self::HorizonFrustumLod => default_projected_error_px(camera, meta),
+            Self::HorizonFrustumLod => default_projected_error_px(config, camera, meta),
         }
     }
 }
@@ -238,10 +248,18 @@ fn default_frustum_visible(config: &RuntimeConfig, camera: &CameraState, meta: &
         .all(|plane| plane.distance_to(center) <= radius)
 }
 
-fn default_projected_error_px(camera: &CameraState, meta: &ChunkMeta) -> f32 {
+fn default_projected_error_px(
+    config: &RuntimeConfig,
+    camera: &CameraState,
+    meta: &ChunkMeta,
+) -> f32 {
     let distance = (meta.bounds.center_planet - camera.position_planet)
         .length()
         .max(f64::from(f32::EPSILON));
+    let reference_height_px =
+        camera.effective_lod_reference_height_px(config.render_lod_reference_height_px);
+    let projection_scale = camera.projection_scale
+        * (f64::from(reference_height_px) / f64::from(camera.viewport_height_px.max(1.0)));
 
-    (f64::from(meta.metrics.geometric_error) * camera.projection_scale / distance) as f32
+    (f64::from(meta.metrics.geometric_error) * projection_scale / distance) as f32
 }

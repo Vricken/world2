@@ -1,6 +1,5 @@
 extends Node
 
-const PROJECT_SETTING_LOD_VIEWPORT_HEIGHT_OVERRIDE := "world2/debug/lod_viewport_height_override"
 const SMALL_WINDOW_FRACTION := 0.5
 const SETTLE_SECONDS := 2.0
 const SAMPLE_SECONDS := 6.0
@@ -24,23 +23,15 @@ func _run() -> void:
 	var window_size := small_window_size
 	var atmosphere_visible := true
 	var scaling_3d_scale := 1.0
-	var lod_override_px := 0.0
 
 	match scenario_name:
 		"small_window":
 			pass
 		"fullscreen_native":
 			window_mode = Window.MODE_FULLSCREEN
-		"fullscreen_fixed_lod":
-			window_mode = Window.MODE_FULLSCREEN
-			lod_override_px = await _measure_small_window_viewport_height(root_window, screen_size)
 		"fullscreen_native_no_atmosphere":
 			window_mode = Window.MODE_FULLSCREEN
 			atmosphere_visible = false
-		"fullscreen_fixed_lod_no_atmosphere":
-			window_mode = Window.MODE_FULLSCREEN
-			atmosphere_visible = false
-			lod_override_px = await _measure_small_window_viewport_height(root_window, screen_size)
 		_:
 			push_error("Unknown perf probe scenario: %s" % scenario_name)
 			get_tree().quit(2)
@@ -51,8 +42,7 @@ func _run() -> void:
 		window_mode,
 		window_size,
 		atmosphere_visible,
-		scaling_3d_scale,
-		lod_override_px
+		scaling_3d_scale
 	)
 	await get_tree().create_timer(SETTLE_SECONDS).timeout
 
@@ -60,12 +50,10 @@ func _run() -> void:
 		root_window,
 		scenario_name,
 		window_mode,
-		atmosphere_visible,
-		lod_override_px
+		atmosphere_visible
 	)
 	print(result_line)
 
-	ProjectSettings.set_setting(PROJECT_SETTING_LOD_VIEWPORT_HEIGHT_OVERRIDE, 0.0)
 	atmosphere.visible = true
 	get_viewport().scaling_3d_scale = 1.0
 	get_tree().quit()
@@ -85,25 +73,12 @@ func _small_window_size(screen_size: Vector2i) -> Vector2i:
 	)
 
 
-func _measure_small_window_viewport_height(root_window: Window, screen_size: Vector2i) -> float:
-	var small_window_size := _small_window_size(screen_size)
-	root_window.mode = Window.MODE_WINDOWED
-	root_window.size = small_window_size
-	root_window.position = (screen_size - small_window_size) / 2
-	ProjectSettings.set_setting(PROJECT_SETTING_LOD_VIEWPORT_HEIGHT_OVERRIDE, 0.0)
-	get_viewport().scaling_3d_scale = 1.0
-	atmosphere.visible = true
-	await get_tree().create_timer(SETTLE_SECONDS).timeout
-	return get_viewport().get_visible_rect().size.y
-
-
 func _apply_scenario(
 	root_window: Window,
 	window_mode: int,
 	window_size: Vector2i,
 	atmosphere_is_visible: bool,
-	scaling_3d_scale: float,
-	lod_override_px: float
+	scaling_3d_scale: float
 ) -> void:
 	root_window.mode = window_mode
 
@@ -114,15 +89,13 @@ func _apply_scenario(
 
 	get_viewport().scaling_3d_scale = scaling_3d_scale
 	atmosphere.visible = atmosphere_is_visible
-	ProjectSettings.set_setting(PROJECT_SETTING_LOD_VIEWPORT_HEIGHT_OVERRIDE, lod_override_px)
 
 
 func _sample_scenario(
 	root_window: Window,
 	scenario_name: String,
 	window_mode: int,
-	atmosphere_is_visible: bool,
-	lod_override_px: float
+	atmosphere_is_visible: bool
 ) -> String:
 	var frame_count := 0
 	var fps_elapsed_start_usec := Time.get_ticks_usec()
@@ -138,6 +111,9 @@ func _sample_scenario(
 	var deferred_upload_bytes_sum := 0.0
 	var viewport_height_sum := 0.0
 	var window_height_sum := 0.0
+	var selected_candidates_sum := 0.0
+	var refinement_iterations_sum := 0.0
+	var selection_cap_hits_sum := 0.0
 
 	while (Time.get_ticks_usec() - fps_elapsed_start_usec) < int(SAMPLE_SECONDS * 1_000_000.0):
 		await get_tree().process_frame
@@ -150,6 +126,9 @@ func _sample_scenario(
 		deferred_upload_bytes_sum += float(planet_root.call("runtime_deferred_upload_bytes"))
 		viewport_height_sum += get_viewport().get_visible_rect().size.y
 		window_height_sum += root_window.size.y
+		selected_candidates_sum += float(planet_root.call("runtime_selected_candidates"))
+		refinement_iterations_sum += float(planet_root.call("runtime_refinement_iterations"))
+		selection_cap_hits_sum += float(planet_root.call("runtime_selection_cap_hits"))
 
 	var elapsed_seconds: float = maxf(
 		float(Time.get_ticks_usec() - fps_elapsed_start_usec) / 1_000_000.0,
@@ -170,7 +149,6 @@ func _sample_scenario(
 	fields.append("viewport_height_px=%d" % int(viewport_size.y))
 	fields.append("scaling_3d_scale=%.4f" % float(get_viewport().scaling_3d_scale))
 	fields.append("atmosphere_visible=%s" % str(atmosphere_is_visible))
-	fields.append("lod_viewport_height_override_px=%.2f" % lod_override_px)
 	fields.append("avg_fps=%.4f" % (frame_count / elapsed_seconds))
 	fields.append("process_ticks_per_second=%.4f" % (float(end_tick - start_tick) / elapsed_seconds))
 	fields.append("avg_desired_render=%.4f" % (desired_render_sum / max(frame_count, 1)))
@@ -178,11 +156,33 @@ func _sample_scenario(
 	fields.append("avg_resident_payloads=%.4f" % (resident_payload_sum / max(frame_count, 1)))
 	fields.append("avg_deferred_commits=%.4f" % (deferred_commit_sum / max(frame_count, 1)))
 	fields.append(
+		"avg_selected_candidates=%.4f" %
+		(selected_candidates_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_refinement_iterations=%.4f" %
+		(refinement_iterations_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_selection_cap_hits=%.4f" %
+		(selection_cap_hits_sum / max(frame_count, 1))
+	)
+	fields.append(
 		"avg_deferred_upload_mib=%.6f" %
 		((deferred_upload_bytes_sum / max(frame_count, 1)) / 1048576.0)
 	)
 	fields.append("avg_viewport_height_px=%.4f" % (viewport_height_sum / max(frame_count, 1)))
 	fields.append("avg_window_height_points=%.4f" % (window_height_sum / max(frame_count, 1)))
+	fields.append(
+		"selection_reference_height_px=%.2f" %
+		float(planet_root.call("runtime_render_lod_reference_height_px"))
+	)
+	fields.append("target_render_chunks=%d" % int(planet_root.call("runtime_target_render_chunks")))
+	fields.append("hard_render_chunk_cap=%d" % int(planet_root.call("runtime_hard_render_chunk_cap")))
+	fields.append(
+		"fullscreen_lod_bias=%s" %
+		str(planet_root.call("runtime_fullscreen_lod_bias")).replace(" ", "|")
+	)
 	fields.append("payloads_per_second=%.4f" % (float(end_payloads - start_payloads) / elapsed_seconds))
 	fields.append(
 		"active_render_per_second=%.4f" %

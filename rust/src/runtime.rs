@@ -8,7 +8,7 @@ mod strategy;
 mod tests;
 mod workers;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -49,6 +49,9 @@ pub use strategy::*;
 pub const DEFAULT_METADATA_PRECOMPUTE_MAX_LOD: u8 = 5;
 pub const DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD: u8 = 8;
 pub const PAYLOAD_PRECOMPUTE_MAX_LOD: u8 = 5;
+pub const DEFAULT_RENDER_LOD_REFERENCE_HEIGHT_PX: f32 = 1080.0;
+pub const DEFAULT_TARGET_RENDER_CHUNKS: usize = 160;
+pub const DEFAULT_HARD_RENDER_CHUNK_CAP: usize = 224;
 pub const DEFAULT_SPLIT_THRESHOLD_PX: f32 = 8.0;
 pub const DEFAULT_MERGE_THRESHOLD_PX: f32 = 4.0;
 pub const DEFAULT_HORIZON_SAFETY_MARGIN: f64 = 16.0;

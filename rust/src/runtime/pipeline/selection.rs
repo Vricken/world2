@@ -11,6 +11,9 @@ pub struct SelectionFrameState {
     pub desired_physics_count: usize,
     pub horizon_survivor_count: usize,
     pub frustum_survivor_count: usize,
+    pub selected_candidates: usize,
+    pub refinement_iterations: usize,
+    pub selection_cap_hits: usize,
     pub selected_leaf_count: usize,
     pub neighbor_split_count: usize,
     pub queued_commit_ops: usize,
@@ -62,6 +65,31 @@ pub struct SelectionFrameState {
     pub sparse_meta_entries: usize,
     pub render_pool_entries: usize,
     pub physics_pool_entries: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RefinementCandidate {
+    key: ChunkKey,
+    split_benefit_px: f32,
+    error_px: f32,
+}
+
+impl Eq for RefinementCandidate {}
+
+impl Ord for RefinementCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.split_benefit_px
+            .total_cmp(&other.split_benefit_px)
+            .then_with(|| self.error_px.total_cmp(&other.error_px))
+            .then_with(|| self.key.lod.cmp(&other.key.lod))
+            .then_with(|| other.key.cmp(&self.key))
+    }
+}
+
+impl PartialOrd for RefinementCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl PlanetRuntime {
@@ -488,19 +516,78 @@ impl PlanetRuntime {
         frame_state: &mut SelectionFrameState,
     ) -> Result<HashSet<ChunkKey>, TopologyError> {
         let mut selected = HashSet::with_capacity(self.active_render.len().max(Face::ALL.len()));
+        let mut refinement_queue = BinaryHeap::new();
         let split_ancestors = self.build_current_split_ancestors();
 
         for face in Face::ALL {
             let key = ChunkKey::new(face, 0, 0, 0);
-            let selected_any = self.select_render_chunk(
+            if self.select_visible_chunk(
                 key,
                 camera,
                 &mut selected,
+                &mut refinement_queue,
                 &split_ancestors,
                 frame_state,
-            )?;
-            if !selected_any && self.config.keep_coarse_lod_chunks_rendered {
+            )? {
+                continue;
+            }
+            if self.config.keep_coarse_lod_chunks_rendered {
                 selected.insert(key);
+            }
+        }
+
+        let refinement_soft_cap = self
+            .config
+            .target_render_chunks
+            .min(self.config.hard_render_chunk_cap);
+        while let Some(candidate) = refinement_queue.pop() {
+            frame_state.refinement_iterations += 1;
+            if !selected.contains(&candidate.key) {
+                continue;
+            }
+
+            let children = candidate
+                .key
+                .children()
+                .expect("queued refinement candidates must not be leaves");
+            let mut child_entries = Vec::with_capacity(children.len());
+            let mut child_count = 0usize;
+
+            for child in children {
+                if self.select_visible_chunk(
+                    child,
+                    camera,
+                    &mut HashSet::new(),
+                    &mut refinement_queue,
+                    &split_ancestors,
+                    frame_state,
+                )? {
+                    child_entries.push((child, true));
+                    child_count += 1;
+                } else if self.config.keep_coarse_lod_chunks_rendered {
+                    child_entries.push((child, false));
+                    child_count += 1;
+                }
+            }
+
+            if child_entries.is_empty() {
+                continue;
+            }
+
+            let projected_count = selected.len().saturating_sub(1).saturating_add(child_count);
+            if projected_count > refinement_soft_cap
+                || projected_count > self.config.hard_render_chunk_cap
+            {
+                frame_state.selection_cap_hits += 1;
+                continue;
+            }
+
+            selected.remove(&candidate.key);
+            for (child, was_visible) in child_entries {
+                selected.insert(child);
+                if !was_visible {
+                    continue;
+                }
             }
         }
 
@@ -511,11 +598,12 @@ impl PlanetRuntime {
         Ok(selected)
     }
 
-    fn select_render_chunk(
+    fn select_visible_chunk(
         &mut self,
         key: ChunkKey,
         camera: &CameraState,
         selected: &mut HashSet<ChunkKey>,
+        refinement_queue: &mut BinaryHeap<RefinementCandidate>,
         split_ancestors: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
     ) -> Result<bool, TopologyError> {
@@ -532,51 +620,16 @@ impl PlanetRuntime {
         frame_state.frustum_survivor_count += 1;
 
         let error_px = self.projected_error_px(camera, &meta);
-        let should_split = key.lod < self.config.max_lod
-            && self.should_split_chunk(key, error_px, split_ancestors);
+        selected.insert(key);
+        self.queue_refinement_candidate(
+            key,
+            error_px,
+            refinement_queue,
+            split_ancestors,
+            frame_state,
+        )?;
 
-        if should_split {
-            let children = key
-                .children()
-                .expect("child keys must exist while below configured max lod");
-            let mut all_children_ready = true;
-            for child in children.iter().copied() {
-                if !self.meta.contains_key(&child) {
-                    self.request_chunk_meta_if_missing(child, frame_state);
-                    all_children_ready = false;
-                }
-            }
-
-            if all_children_ready {
-                let mut selected_any = false;
-                for child in children.iter().copied() {
-                    let child_selected = self.select_render_chunk(
-                        child,
-                        camera,
-                        selected,
-                        split_ancestors,
-                        frame_state,
-                    )?;
-                    if child_selected {
-                        selected_any = true;
-                    } else if self.config.keep_coarse_lod_chunks_rendered {
-                        selected.insert(child);
-                        selected_any = true;
-                    }
-                }
-                if selected_any {
-                    return Ok(true);
-                }
-            } else {
-                selected.insert(key);
-                return Ok(true);
-            }
-        } else {
-            selected.insert(key);
-            return Ok(true);
-        }
-
-        Ok(false)
+        Ok(true)
     }
 
     fn build_current_split_ancestors(&self) -> HashSet<ChunkKey> {
@@ -612,6 +665,67 @@ impl PlanetRuntime {
         }
     }
 
+    fn queue_refinement_candidate(
+        &mut self,
+        key: ChunkKey,
+        error_px: f32,
+        refinement_queue: &mut BinaryHeap<RefinementCandidate>,
+        split_ancestors: &HashSet<ChunkKey>,
+        frame_state: &mut SelectionFrameState,
+    ) -> Result<(), TopologyError> {
+        let Some(candidate) =
+            self.build_refinement_candidate(key, error_px, split_ancestors, frame_state)?
+        else {
+            return Ok(());
+        };
+
+        refinement_queue.push(candidate);
+        frame_state.selected_candidates += 1;
+        Ok(())
+    }
+
+    fn build_refinement_candidate(
+        &mut self,
+        key: ChunkKey,
+        error_px: f32,
+        split_ancestors: &HashSet<ChunkKey>,
+        frame_state: &mut SelectionFrameState,
+    ) -> Result<Option<RefinementCandidate>, TopologyError> {
+        if key.lod >= self.config.max_lod
+            || !self.should_split_chunk(key, error_px, split_ancestors)
+        {
+            return Ok(None);
+        }
+
+        let children = key
+            .children()
+            .expect("child keys must exist while below configured max lod");
+        let mut all_children_ready = true;
+        for child in children {
+            if self.meta.contains_key(&child) {
+                continue;
+            }
+            self.request_chunk_meta_if_missing(child, frame_state);
+            all_children_ready = false;
+        }
+        if !all_children_ready {
+            return Ok(None);
+        }
+
+        let split_threshold_px = if split_ancestors.contains(&key) {
+            self.config.merge_threshold_px
+        } else {
+            self.config.split_threshold_px
+        };
+        let split_benefit_px = error_px - split_threshold_px;
+
+        Ok((split_benefit_px > 0.0).then_some(RefinementCandidate {
+            key,
+            split_benefit_px,
+            error_px,
+        }))
+    }
+
     pub(crate) fn normalize_neighbor_lod_delta(
         &mut self,
         selected: &mut HashSet<ChunkKey>,
@@ -622,6 +736,7 @@ impl PlanetRuntime {
             frame_state,
             MAX_NEIGHBOR_NORMALIZATION_PASSES_PER_FRAME,
             MAX_NEIGHBOR_NORMALIZATION_WORK_ITEMS_PER_FRAME,
+            self.config.hard_render_chunk_cap,
         )
     }
 
@@ -631,6 +746,7 @@ impl PlanetRuntime {
         frame_state: &mut SelectionFrameState,
         max_passes: usize,
         max_work_items: usize,
+        hard_chunk_cap: usize,
     ) -> Result<usize, TopologyError> {
         let mut splits_applied = 0usize;
         let mut seen_states = HashSet::new();
@@ -689,7 +805,12 @@ impl PlanetRuntime {
             }
 
             let mut progressed_this_pass = false;
+            let mut hard_cap_blocked = false;
             for coarse_key in split_targets {
+                if selected.len().saturating_add(3) > hard_chunk_cap {
+                    hard_cap_blocked = true;
+                    continue;
+                }
                 if !selected.remove(&coarse_key) {
                     continue;
                 }
@@ -732,6 +853,9 @@ impl PlanetRuntime {
             }
 
             if !progressed_this_pass {
+                if hard_cap_blocked {
+                    self.force_collapse_neighbor_lod_delta(selected)?;
+                }
                 return Ok(splits_applied);
             }
         }

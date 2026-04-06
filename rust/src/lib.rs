@@ -98,7 +98,7 @@ impl INode3D for PlanetRoot {
         let strategies = self.runtime.strategy_summary();
 
         godot_print!(
-            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} planet_radius={} runtime_max_lod={} runtime_max_lod_cap={} metadata_precompute_max_lod={} dense_metadata_prebuild_max_lod={} payload_precompute_max_lod={} sparse_meta={} min_avg_chunk_span_m={} worker_threads={} prebuilt_meta={} edge_xforms={} topology_default_max_lod={} topology_supported_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
+            "PlanetRoot ready. {} active. chunks_in_scene_tree=false cached_world_rids={} origin_mode={} large_world_coordinates={} origin_recenter_distance={} planet_radius={} runtime_max_lod={} runtime_max_lod_cap={} metadata_precompute_max_lod={} dense_metadata_prebuild_max_lod={} payload_precompute_max_lod={} selection_reference_height_px={} target_render_chunks={} hard_render_chunk_cap={} sparse_meta={} min_avg_chunk_span_m={} worker_threads={} prebuilt_meta={} edge_xforms={} topology_default_max_lod={} topology_supported_max_lod={} visible_edge_verts={} sampled_edge_verts={} stitch_variants={} base_index_count={} planet_seed={} asset_cells_per_axis={} asset_group_span={} active_asset_groups={} active_asset_instances={} active_stitch_masks={} pooled_stitch_masks={} build_order_summary={} strategy_summary={} next_phase={}",
             CURRENT_IMPLEMENTED_PHASE_LABEL,
             self.has_cached_world_rids(),
             self.runtime.origin_mode_label(),
@@ -110,6 +110,9 @@ impl INode3D for PlanetRoot {
             self.runtime.metadata_precompute_max_lod(),
             self.runtime.dense_metadata_prebuild_max_lod(),
             self.runtime.payload_precompute_max_lod(),
+            self.runtime.config.render_lod_reference_height_px,
+            self.runtime.config.target_render_chunks,
+            self.runtime.config.hard_render_chunk_cap,
             self.runtime.sparse_meta_count(),
             DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS,
             self.runtime.worker_thread_count(),
@@ -185,7 +188,7 @@ impl INode3D for PlanetRoot {
             let assets = self.runtime.asset_debug_snapshot();
             let strategies = self.runtime.strategy_summary();
             godot_print!(
-                "PlanetRoot phase{} tick={} meta={} sparse_meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} meta_submitted={} meta_installed={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_submitted={} worker_jobs={} worker_ready={} worker_stale={} worker_superseded={} worker_inflight={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={} build_order_steps={} strategy_summary={} next_phase={}",
+                "PlanetRoot phase{} tick={} meta={} sparse_meta={} payloads={} desired_render={} active_render={} desired_physics={} active_physics={} horizon={} frustum={} selected_candidates={} refinement_iterations={} selection_cap_hits={} fullscreen_lod_bias=none selection_reference_height_px={} target_render_chunks={} hard_render_chunk_cap={} neighbor_splits={} sampled={} meshed={} packed={} staged={} commit_payloads={} warm_current={} warm_pool={} cold={} render_warm_current_commits={} render_warm_pool_commits={} render_cold_commits={} physics_commits={} meta_submitted={} meta_installed={} fallback_missing_current={} fallback_incompatible_current={} fallback_no_pool={} worker_threads={} worker_submitted={} worker_jobs={} worker_ready={} worker_stale={} worker_superseded={} worker_inflight={} worker_queue_peak={} worker_waits={} sample_scratch_reuse={} mesh_scratch_reuse={} pack_scratch_reuse={} scratch_growth={} origin_rebases={} render_rebinds={} physics_rebinds={} origin_mode={} render_pool_entries={} physics_pool_entries={} asset_payload_chunks={} asset_candidates={} asset_rejected={} asset_accepted={} active_asset_groups={} active_asset_instances={} asset_family_meshes={} active_stitched_chunks={} active_stitch_masks={} stitched_edges={} pooled_stitch_masks={} pending_seam_mismatches={} missing_active_surface_classes={} queued_ops={} deferred_ops={} deferred_upload_bytes={} starvation_frames={} build_order_steps={} strategy_summary={} next_phase={}",
                 CURRENT_IMPLEMENTED_PHASE,
                 frame.tick,
                 self.runtime.meta_count(),
@@ -197,6 +200,12 @@ impl INode3D for PlanetRoot {
                 self.runtime.active_physics_count(),
                 frame.horizon_survivor_count,
                 frame.frustum_survivor_count,
+                frame.selected_candidates,
+                frame.refinement_iterations,
+                frame.selection_cap_hits,
+                self.runtime.config.render_lod_reference_height_px,
+                self.runtime.config.target_render_chunks,
+                self.runtime.config.hard_render_chunk_cap,
                 frame.neighbor_split_count,
                 frame.phase7_sampled_chunks,
                 frame.phase7_meshed_chunks,
@@ -629,6 +638,21 @@ impl PlanetRoot {
     }
 
     #[func]
+    fn runtime_selected_candidates(&self) -> i64 {
+        self.runtime.frame_state().selected_candidates as i64
+    }
+
+    #[func]
+    fn runtime_refinement_iterations(&self) -> i64 {
+        self.runtime.frame_state().refinement_iterations as i64
+    }
+
+    #[func]
+    fn runtime_selection_cap_hits(&self) -> i64 {
+        self.runtime.frame_state().selection_cap_hits as i64
+    }
+
+    #[func]
     fn runtime_sparse_meta_count(&self) -> i64 {
         self.runtime.sparse_meta_count() as i64
     }
@@ -661,6 +685,26 @@ impl PlanetRoot {
     #[func]
     fn runtime_max_lod_cap(&self) -> i64 {
         self.runtime.config.max_lod_cap as i64
+    }
+
+    #[func]
+    fn runtime_render_lod_reference_height_px(&self) -> f64 {
+        f64::from(self.runtime.config.render_lod_reference_height_px)
+    }
+
+    #[func]
+    fn runtime_target_render_chunks(&self) -> i64 {
+        self.runtime.config.target_render_chunks as i64
+    }
+
+    #[func]
+    fn runtime_hard_render_chunk_cap(&self) -> i64 {
+        self.runtime.config.hard_render_chunk_cap as i64
+    }
+
+    #[func]
+    fn runtime_fullscreen_lod_bias(&self) -> GString {
+        GString::from("none")
     }
 
     #[func]
@@ -761,6 +805,7 @@ impl PlanetRoot {
             raw.frustum_planes,
             raw.fov_y_degrees,
             raw.viewport_height_px,
+            raw.lod_reference_height_px_override,
             self.runtime.origin_snapshot(),
         ))
     }
@@ -786,14 +831,14 @@ impl PlanetRoot {
             frustum.at(5),
         ];
         let visible_rect = viewport.get_visible_rect();
-        let viewport_height_px = Self::project_lod_viewport_height_override()
-            .unwrap_or_else(|| visible_rect.size.y.max(1.0));
+        let viewport_height_px = visible_rect.size.y.max(1.0);
 
         Some(RawCameraState {
             transform: camera.get_camera_transform(),
             frustum_planes,
             fov_y_degrees: camera.get_fov(),
             viewport_height_px,
+            lod_reference_height_px_override: Self::project_lod_viewport_height_override(),
         })
     }
 
@@ -872,6 +917,7 @@ struct RawCameraState {
     frustum_planes: [Plane; 6],
     fov_y_degrees: f32,
     viewport_height_px: f32,
+    lod_reference_height_px_override: Option<f32>,
 }
 
 struct World2Extension;

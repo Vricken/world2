@@ -941,6 +941,9 @@ pub struct RuntimeConfig {
     pub origin_recenter_distance: f64,
     pub planet_radius: f64,
     pub height_amplitude: f64,
+    pub render_lod_reference_height_px: f32,
+    pub target_render_chunks: usize,
+    pub hard_render_chunk_cap: usize,
     pub split_threshold_px: f32,
     pub merge_threshold_px: f32,
     pub horizon_safety_margin: f64,
@@ -979,6 +982,12 @@ impl RuntimeConfig {
         self.dense_metadata_prebuild_max_lod =
             self.dense_metadata_prebuild_max_lod.min(self.max_lod);
         self.payload_precompute_max_lod = self.payload_precompute_max_lod.min(self.max_lod);
+        self.render_lod_reference_height_px = self.render_lod_reference_height_px.max(1.0);
+        self.hard_render_chunk_cap = self.hard_render_chunk_cap.max(Face::ALL.len());
+        self.target_render_chunks = self
+            .target_render_chunks
+            .max(Face::ALL.len())
+            .min(self.hard_render_chunk_cap);
         self
     }
 }
@@ -1015,6 +1024,9 @@ impl Default for RuntimeConfig {
             origin_recenter_distance: DEFAULT_ORIGIN_RECENTER_DISTANCE,
             planet_radius: terrain.planet_radius,
             height_amplitude: terrain.height_amplitude,
+            render_lod_reference_height_px: DEFAULT_RENDER_LOD_REFERENCE_HEIGHT_PX,
+            target_render_chunks: DEFAULT_TARGET_RENDER_CHUNKS,
+            hard_render_chunk_cap: DEFAULT_HARD_RENDER_CHUNK_CAP,
             split_threshold_px: DEFAULT_SPLIT_THRESHOLD_PX,
             merge_threshold_px: DEFAULT_MERGE_THRESHOLD_PX,
             horizon_safety_margin: DEFAULT_HORIZON_SAFETY_MARGIN,
@@ -1046,6 +1058,8 @@ pub struct CameraState {
     pub forward_planet: DVec3,
     pub frustum_planes: [Plane; 6],
     pub projection_scale: f64,
+    pub viewport_height_px: f32,
+    pub lod_reference_height_px_override: Option<f32>,
     pub origin: OriginSnapshot,
 }
 
@@ -1055,21 +1069,31 @@ impl CameraState {
         frustum_planes: [Plane; 6],
         fov_y_degrees: f32,
         viewport_height_px: f32,
+        lod_reference_height_px_override: Option<f32>,
         origin: OriginSnapshot,
     ) -> Self {
         let position_planet = vector3_to_dvec3(transform.origin) + origin.render_origin_planet;
         let forward_planet = -vector3_to_dvec3(transform.basis.col_c()).normalize_or_zero();
         let half_fov_radians = f64::from(fov_y_degrees).to_radians() * 0.5;
+        let viewport_height_px = viewport_height_px.max(1.0);
         let projection_scale =
-            f64::from(viewport_height_px.max(1.0)) / (2.0 * half_fov_radians.tan().max(1.0e-6));
+            f64::from(viewport_height_px) / (2.0 * half_fov_radians.tan().max(1.0e-6));
 
         Self {
             position_planet,
             forward_planet,
             frustum_planes,
             projection_scale,
+            viewport_height_px,
+            lod_reference_height_px_override,
             origin,
         }
+    }
+
+    pub fn effective_lod_reference_height_px(&self, default_reference_height_px: f32) -> f32 {
+        self.lod_reference_height_px_override
+            .unwrap_or(default_reference_height_px)
+            .max(1.0)
     }
 }
 

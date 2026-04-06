@@ -1,6 +1,6 @@
 # world2
 
-Phase 15 strategy-layer refinement for a Godot + Rust (godot-rust/gdext) planet runtime.
+Phase 15 strategy-layer refinement plus GPU refactor Phase 01 resolution-invariant selection for a Godot + Rust (godot-rust/gdext) planet runtime.
 
 ## What is set up
 
@@ -14,6 +14,7 @@ Phase 15 strategy-layer refinement for a Godot + Rust (godot-rust/gdext) planet 
 - Phase 05 canonical mesh topology in `rust/src/mesh_topology.rs`, including locked `32/33/35` chunk constants, precomputed base plus 16 stitch index variants, and fine-to-coarse stitch-mask derivation.
 - Phase 05 surface compatibility tightening in `rust/src/runtime/data.rs`, including topology/stitch/index/material/format class keys, stride-aware byte validation, and warm-path fallback routing when reuse is incompatible.
 - Phase 06 visibility and LOD selection in `rust/src/runtime/pipeline/selection.rs`, including sampled per-chunk min/max height metadata, startup dense metadata prebuild through a bounded LOD tier with sparse async metadata growth above that tier, horizon-first visibility traversal with no near-surface hard disable, optional frustum-culling bypass, optional coarse fallback chunk retention when a face would otherwise go empty, projected-error split/merge hysteresis, cached split-ancestor bookkeeping, capped near-camera physics residency, coverage-safe render retirement, and budgeted commit/upload deferral metrics.
+- GPU refactor Phase 01 selector controls in `rust/src/runtime/data.rs`, `rust/src/runtime/pipeline/selection.rs`, `rust/src/runtime/strategy.rs`, `rust/src/runtime/tests.rs`, and `rust/src/lib.rs`, including a fixed `render_lod_reference_height_px`, best-first refinement from visible roots, explicit `target_render_chunks` plus `hard_render_chunk_cap` bounds, post-cap neighbor normalization that still enforces `delta <= 1`, and runtime diagnostics for `selected_candidates`, `refinement_iterations`, `selection_cap_hits`, and `fullscreen_lod_bias=none`.
 - Phase 06 runtime tick integration in `rust/src/lib.rs`, including active-camera frustum capture, per-frame selector execution, and headless-friendly debug counters/logging.
 - Phase 07 configurable metadata prebuild and payload policy in `rust/src/runtime/core.rs`, including `metadata_precompute_max_lod`, `dense_metadata_prebuild_max_lod`, legacy/internal `payload_precompute_max_lod`, and startup metadata prebuild through the bounded dense tier instead of the full runtime `max_lod`.
 - Phase 07 scalar-field sampling and mesh derivation in `rust/src/runtime/pipeline/selection.rs` and `rust/src/runtime/workers/payloads.rs`, including `35 x 35` border-ring sample grids, seam-safe cube-surface remapping across face edges, normals derived from sampled global field, tangents/UVs/colors, and stitch-mask-driven index selection.
@@ -79,11 +80,10 @@ Run the scripted small-window/fullscreen probe:
 This launches `res://scenes/profiling/perf_probe.tscn` through the normal project runtime, captures `PERF_RESULT` lines for:
 
 - small window baseline
-- fullscreen at native LOD selection
-- fullscreen with LOD locked to the small-window viewport height
+- fullscreen with the shipped reference-height selector
 - fullscreen without the atmosphere pass
 
-The probe also uses the debug-only Project Setting `world2/debug/lod_viewport_height_override` to hold the selector's projected-error viewport height constant while the window size changes, which makes it easier to separate pixel/fill cost from extra fullscreen-driven LOD demand.
+The probe reports the Phase 01 selector metrics directly, including `selection_reference_height_px`, `target_render_chunks`, `hard_render_chunk_cap`, `avg_selected_candidates`, `avg_refinement_iterations`, `avg_selection_cap_hits`, and `fullscreen_lod_bias=none`. The debug-only Project Setting `world2/debug/lod_viewport_height_override` remains available for manual experiments, but the shipped selector no longer depends on live viewport height to keep fullscreen demand stable.
 
 ## Controls
 
