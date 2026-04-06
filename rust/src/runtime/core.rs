@@ -30,6 +30,11 @@ impl PlanetRuntime {
             resident_payloads: HashMap::new(),
             rid_state: HashMap::new(),
             render_pool: HashMap::new(),
+            canonical_render_meshes: HashMap::new(),
+            gpu_material_pool: HashMap::new(),
+            gpu_active_materials: HashMap::new(),
+            gpu_render_instance_pool: VecDeque::new(),
+            terrain_shader: None,
             physics_pool: VecDeque::new(),
             asset_groups: HashMap::new(),
             asset_family_meshes: HashMap::new(),
@@ -393,6 +398,14 @@ impl PlanetRuntime {
 
     pub fn rid_state_count(&self) -> usize {
         self.rid_state.len()
+    }
+
+    pub fn active_gpu_render_count(&self) -> usize {
+        self.gpu_active_materials.len()
+    }
+
+    pub fn canonical_render_mesh_count(&self) -> usize {
+        self.canonical_render_meshes.len()
     }
 
     pub fn active_asset_group_count(&self) -> usize {

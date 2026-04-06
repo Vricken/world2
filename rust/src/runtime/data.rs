@@ -903,6 +903,35 @@ pub struct ChunkRidState {
     pub pooled_surface_class: Option<SurfaceClassKey>,
 }
 
+#[derive(Debug)]
+pub struct CanonicalRenderMeshEntry {
+    pub surface_class: SurfaceClassKey,
+    pub mesh: Option<Gd<ArrayMesh>>,
+}
+
+#[derive(Debug)]
+pub struct GpuMaterialPoolEntry {
+    pub surface_class: SurfaceClassKey,
+    pub shader_material: Option<Gd<ShaderMaterial>>,
+    pub height_texture: Option<Gd<ImageTexture>>,
+    pub material_texture: Option<Gd<ImageTexture>>,
+    pub height_image: Option<Gd<Image>>,
+    pub material_image: Option<Gd<Image>>,
+}
+
+impl GpuMaterialPoolEntry {
+    pub fn new(surface_class: SurfaceClassKey) -> Self {
+        Self {
+            surface_class,
+            shader_material: None,
+            height_texture: None,
+            material_texture: None,
+            height_image: None,
+            material_image: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderResidencyEntry {
     pub desired: bool,

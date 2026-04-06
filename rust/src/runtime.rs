@@ -21,9 +21,12 @@ use godot::builtin::{
 };
 use godot::classes::physics_server_3d::{BodyMode, BodyState};
 use godot::classes::rendering_server::{MultimeshTransformFormat, PrimitiveType};
-use godot::classes::{PhysicsServer3D, RenderingServer};
+use godot::classes::{
+    ArrayMesh, Image, ImageTexture, PhysicsServer3D, RenderingServer, Shader, ShaderMaterial,
+};
 use godot::meta::ToGodot;
-use godot::obj::Singleton;
+use godot::obj::{Gd, NewGd, Singleton};
+use godot::tools::load;
 
 use crate::geometry::{
     chunk_uv_to_face_uv, cube_point_for_face, face_uv_to_signed_coords, CubeProjection,
@@ -78,6 +81,7 @@ pub const DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS: f64 = 32.0;
 pub const CURRENT_IMPLEMENTED_PHASE: u8 = 15;
 pub const CURRENT_IMPLEMENTED_PHASE_LABEL: &str = "Phase 15 strategy-layer refinement";
 pub const NEXT_PHASE_LABEL: &str = "none";
+pub const PHASE4_TERRAIN_SHADER_PATH: &str = "res://shaders/terrain_gpu_chunk.gdshader";
 const PACKED_NORMAL_BYTES: usize = 12;
 const PACKED_UV_BYTES: usize = 8;
 const PACKED_COLOR_BYTES: usize = 4;
@@ -291,6 +295,11 @@ pub struct PlanetRuntime {
     pub resident_payloads: HashMap<ChunkKey, ChunkPayload>,
     pub rid_state: HashMap<ChunkKey, ChunkRidState>,
     pub render_pool: HashMap<SurfaceClassKey, VecDeque<RenderPoolEntry>>,
+    pub canonical_render_meshes: HashMap<SurfaceClassKey, CanonicalRenderMeshEntry>,
+    pub gpu_material_pool: HashMap<SurfaceClassKey, VecDeque<GpuMaterialPoolEntry>>,
+    pub gpu_active_materials: HashMap<ChunkKey, GpuMaterialPoolEntry>,
+    pub gpu_render_instance_pool: VecDeque<Rid>,
+    pub terrain_shader: Option<Gd<Shader>>,
     pub physics_pool: VecDeque<PhysicsPoolEntry>,
     pub asset_groups: HashMap<AssetGroupKey, AssetGroupState>,
     pub asset_family_meshes: HashMap<u16, Rid>,

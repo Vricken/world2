@@ -18,6 +18,20 @@ fn test_runtime() -> PlanetRuntime {
     )
 }
 
+fn test_gpu_runtime() -> PlanetRuntime {
+    PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+            dense_metadata_prebuild_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+            enable_godot_staging: false,
+            render_backend: RenderBackendKind::GpuDisplacedCanonical,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    )
+}
+
 fn sample_key() -> ChunkKey {
     ChunkKey::new(Face::Px, 2, 1, 1)
 }
@@ -2618,4 +2632,57 @@ fn phase15_render_backend_can_be_exercised_independently() {
 
     backend.deactivate_render(&mut runtime, key);
     assert!(!runtime.ensure_rid_state(key).render_resident);
+}
+
+#[test]
+fn phase4_gpu_backend_uses_render_tiles_for_upload_accounting() {
+    let mut runtime = test_gpu_runtime();
+    let key = sample_key();
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
+
+    runtime
+        .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+        .unwrap();
+
+    let payload = runtime.resident_payloads.get(&key).unwrap();
+    assert_eq!(
+        runtime.payload_upload_bytes(key),
+        payload.render_tile_bytes()
+    );
+    assert!(payload.render_tile_bytes() < payload.upload_bytes());
+}
+
+#[test]
+fn phase4_gpu_backend_reuses_canonical_meshes_for_matching_surface_class() {
+    let mut runtime = test_gpu_runtime();
+    let surface_class = sample_surface_class();
+    let key_a = ChunkKey::new(Face::Px, 2, 1, 1);
+    let key_b = ChunkKey::new(Face::Px, 2, 2, 1);
+    let mut frame_state = SelectionFrameState::default();
+
+    runtime.insert_payload(key_a, sample_payload(&surface_class, 1));
+    runtime.insert_payload(key_b, sample_payload(&surface_class, 2));
+
+    assert!(runtime.commit_render_payload(key_a, &mut frame_state));
+    assert!(runtime.commit_render_payload(key_b, &mut frame_state));
+    assert_eq!(runtime.canonical_render_mesh_count(), 1);
+    assert_eq!(runtime.active_gpu_render_count(), 2);
+    assert_eq!(frame_state.phase4_canonical_meshes, 1);
+}
+
+#[test]
+fn phase4_gpu_backend_does_not_require_cpu_render_mesh_bytes_for_activation() {
+    let mut runtime = test_gpu_runtime();
+    let key = sample_key();
+    let surface_class = sample_surface_class();
+    let mut payload = sample_payload(&surface_class, 4);
+    payload.mesh = CpuMeshBuffers::default();
+    payload.packed_regions = None;
+    runtime.insert_payload(key, payload);
+
+    let mut frame_state = SelectionFrameState::default();
+    assert!(runtime.commit_render_payload(key, &mut frame_state));
+    assert!(runtime.ensure_rid_state(key).render_resident);
+    assert_eq!(frame_state.phase4_gpu_material_binds, 1);
 }

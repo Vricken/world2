@@ -116,6 +116,10 @@ func _sample_scenario(
 	var selection_cap_hits_sum := 0.0
 	var render_residency_sum := 0.0
 	var render_residency_evictions_sum := 0.0
+	var phase4_gpu_tile_upload_bytes_sum := 0.0
+	var phase4_gpu_material_binds_sum := 0.0
+	var phase4_active_gpu_render_chunks_sum := 0.0
+	var phase4_canonical_meshes_sum := 0.0
 	var render_tile_bytes_sum := 0.0
 	var render_tile_pool_slots_sum := 0.0
 	var render_tile_pool_active_slots_sum := 0.0
@@ -141,6 +145,18 @@ func _sample_scenario(
 		selection_cap_hits_sum += float(planet_root.call("runtime_selection_cap_hits"))
 		render_residency_sum += float(planet_root.call("runtime_render_residency_count"))
 		render_residency_evictions_sum += float(planet_root.call("runtime_render_residency_evictions"))
+		phase4_gpu_tile_upload_bytes_sum += float(
+			planet_root.call("runtime_phase4_gpu_tile_upload_bytes")
+		)
+		phase4_gpu_material_binds_sum += float(
+			planet_root.call("runtime_phase4_gpu_material_binds")
+		)
+		phase4_active_gpu_render_chunks_sum += float(
+			planet_root.call("runtime_phase4_active_gpu_render_chunks")
+		)
+		phase4_canonical_meshes_sum += float(
+			planet_root.call("runtime_phase4_canonical_meshes")
+		)
 		render_tile_bytes_sum += float(planet_root.call("runtime_render_tile_bytes"))
 		render_tile_pool_slots_sum += float(planet_root.call("runtime_render_tile_pool_slots"))
 		render_tile_pool_active_slots_sum += float(
@@ -204,6 +220,22 @@ func _sample_scenario(
 	fields.append(
 		"avg_render_residency_evictions=%.4f" %
 		(render_residency_evictions_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_phase4_gpu_tile_upload_mib=%.6f" %
+		((phase4_gpu_tile_upload_bytes_sum / max(frame_count, 1)) / 1048576.0)
+	)
+	fields.append(
+		"avg_phase4_gpu_material_binds=%.4f" %
+		(phase4_gpu_material_binds_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_phase4_active_gpu_render_chunks=%.4f" %
+		(phase4_active_gpu_render_chunks_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_phase4_canonical_meshes=%.4f" %
+		(phase4_canonical_meshes_sum / max(frame_count, 1))
 	)
 	fields.append(
 		"avg_render_tile_mib=%.6f" %

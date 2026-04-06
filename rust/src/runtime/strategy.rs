@@ -107,12 +107,14 @@ pub trait ChunkRenderBackend {
 pub enum RenderBackendKind {
     #[default]
     ServerPool,
+    GpuDisplacedCanonical,
 }
 
 impl ChunkRenderBackend for RenderBackendKind {
     fn label(&self) -> &'static str {
         match self {
             Self::ServerPool => "server_pool_render_backend",
+            Self::GpuDisplacedCanonical => "gpu_displaced_canonical_render_backend",
         }
     }
 
@@ -124,12 +126,16 @@ impl ChunkRenderBackend for RenderBackendKind {
     ) -> bool {
         match self {
             Self::ServerPool => runtime.commit_render_payload_with_server_backend(key, frame_state),
+            Self::GpuDisplacedCanonical => {
+                runtime.commit_render_payload_with_gpu_backend(key, frame_state)
+            }
         }
     }
 
     fn deactivate_render(&self, runtime: &mut PlanetRuntime, key: ChunkKey) {
         match self {
             Self::ServerPool => runtime.deactivate_render_commit_with_server_backend(key),
+            Self::GpuDisplacedCanonical => runtime.deactivate_render_commit_with_gpu_backend(key),
         }
     }
 }

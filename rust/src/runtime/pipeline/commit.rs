@@ -1,4 +1,5 @@
 use super::super::*;
+use godot::classes::image::Format as ImageFormat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CommitOp {
@@ -248,6 +249,8 @@ impl PlanetRuntime {
         frame_state.render_tile_pool_active_slots = tile_pool.active_slots;
         frame_state.render_tile_pool_free_slots = tile_pool.free_slots;
         frame_state.render_tile_eviction_ready_slots = tile_pool.eviction_ready_slots;
+        frame_state.phase4_active_gpu_render_chunks = self.active_gpu_render_count();
+        frame_state.phase4_canonical_meshes = self.canonical_render_mesh_count();
         let asset_debug = self.asset_debug_snapshot();
         frame_state.phase12_active_groups = asset_debug.active_groups;
         frame_state.phase12_active_instances = asset_debug.active_instances;
@@ -594,7 +597,10 @@ impl PlanetRuntime {
     pub(crate) fn payload_upload_bytes(&self, key: ChunkKey) -> usize {
         self.resident_payloads
             .get(&key)
-            .map(ChunkPayload::upload_bytes)
+            .map(|payload| match self.config.render_backend {
+                RenderBackendKind::ServerPool => payload.upload_bytes(),
+                RenderBackendKind::GpuDisplacedCanonical => payload.render_tile_bytes(),
+            })
             .unwrap_or(0)
     }
 
@@ -872,6 +878,99 @@ impl PlanetRuntime {
         true
     }
 
+    pub(crate) fn commit_render_payload_with_gpu_backend(
+        &mut self,
+        key: ChunkKey,
+        frame_state: &mut SelectionFrameState,
+    ) -> bool {
+        let (surface_class, chunk_origin_planet, render_tile, chunk_bounds) = {
+            let Some(payload) = self.resident_payloads.get(&key) else {
+                return false;
+            };
+            let surface_class = payload.surface_class.clone();
+            let chunk_origin_planet = payload.chunk_origin_planet;
+            let render_tile = payload.render_tile.clone();
+            let _ = payload;
+            let Ok(meta) = self.ensure_chunk_meta(key) else {
+                return false;
+            };
+            (surface_class, chunk_origin_planet, render_tile, meta.bounds)
+        };
+
+        if render_tile.validate_layout().is_err() {
+            return false;
+        }
+
+        let render_transform = self.render_transform_for_chunk(chunk_origin_planet);
+        let render_instance_rid = self.take_or_create_gpu_render_instance(key);
+        let mut material_entry = self.take_active_gpu_material(key).unwrap_or_else(|| {
+            self.pop_gpu_material_entry(&surface_class)
+                .unwrap_or_else(|| GpuMaterialPoolEntry::new(surface_class.clone()))
+        });
+        if material_entry.surface_class != surface_class {
+            let recycled = std::mem::replace(
+                &mut material_entry,
+                self.pop_gpu_material_entry(&surface_class)
+                    .unwrap_or_else(|| GpuMaterialPoolEntry::new(surface_class.clone())),
+            );
+            self.recycle_gpu_material_entry(recycled);
+        }
+        let Some(mesh_rid) = self.ensure_canonical_render_mesh_rid(&surface_class) else {
+            self.recycle_gpu_material_entry(material_entry);
+            return false;
+        };
+
+        if self.should_commit_to_servers() {
+            if !self.update_gpu_material_entry(
+                key,
+                chunk_origin_planet,
+                &render_tile,
+                &mut material_entry,
+            ) {
+                self.recycle_gpu_material_entry(material_entry);
+                return false;
+            }
+
+            let Some(material_rid) = material_entry
+                .shader_material
+                .as_ref()
+                .map(|material| material.get_rid())
+            else {
+                self.recycle_gpu_material_entry(material_entry);
+                return false;
+            };
+
+            let mut rendering_server = RenderingServer::singleton();
+            rendering_server.instance_set_base(render_instance_rid, mesh_rid);
+            rendering_server.instance_set_scenario(render_instance_rid, self.scenario_rid);
+            rendering_server.instance_set_transform(render_instance_rid, render_transform);
+            rendering_server.instance_set_surface_override_material(
+                render_instance_rid,
+                0,
+                material_rid,
+            );
+            rendering_server.instance_set_custom_aabb(
+                render_instance_rid,
+                self.chunk_custom_aabb(chunk_bounds),
+            );
+            rendering_server.instance_set_visible(render_instance_rid, true);
+        }
+
+        let rid_state = self.ensure_rid_state(key);
+        rid_state.mesh_rid = None;
+        rid_state.render_instance_rid = Some(render_instance_rid);
+        rid_state.render_resident = true;
+        rid_state.active_surface_class = Some(surface_class.clone());
+        rid_state.pooled_surface_class = Some(surface_class);
+        rid_state.gd_staging = None;
+        self.gpu_active_materials.insert(key, material_entry);
+        frame_state.phase4_gpu_tile_upload_bytes += render_tile.byte_len();
+        frame_state.phase4_gpu_material_binds += 1;
+        frame_state.phase4_active_gpu_render_chunks = self.gpu_active_materials.len();
+        frame_state.phase4_canonical_meshes = self.canonical_render_meshes.len();
+        true
+    }
+
     fn commit_render_payload_cold(
         &mut self,
         key: ChunkKey,
@@ -1004,6 +1103,22 @@ impl PlanetRuntime {
         rid_state.render_resident = false;
     }
 
+    pub(crate) fn deactivate_render_commit_with_gpu_backend(&mut self, key: ChunkKey) {
+        if let Some(entry) = self.take_active_gpu_material(key) {
+            self.recycle_gpu_material_entry(entry);
+        }
+        if let Some(render_instance_rid) = self.take_current_gpu_render_instance(key) {
+            self.recycle_gpu_render_instance(render_instance_rid);
+        }
+
+        let rid_state = self.ensure_rid_state(key);
+        rid_state.mesh_rid = None;
+        rid_state.render_resident = false;
+        rid_state.active_surface_class = None;
+        rid_state.pooled_surface_class = None;
+        rid_state.gd_staging = None;
+    }
+
     fn deactivate_physics_commit(&mut self, key: ChunkKey) {
         if let Some(entry) = self.take_current_physics_entry(key) {
             self.recycle_physics_entry(entry);
@@ -1086,6 +1201,305 @@ impl PlanetRuntime {
             rendering_server.free_rid(entry.render_instance_rid);
             rendering_server.free_rid(entry.mesh_rid);
         }
+    }
+
+    fn ensure_terrain_shader(&mut self) -> Option<Gd<Shader>> {
+        if let Some(shader) = self.terrain_shader.clone() {
+            return Some(shader);
+        }
+
+        let shader = load::<Shader>(PHASE4_TERRAIN_SHADER_PATH);
+        self.terrain_shader = Some(shader.clone());
+        Some(shader)
+    }
+
+    fn ensure_canonical_render_mesh_rid(&mut self, surface_class: &SurfaceClassKey) -> Option<Rid> {
+        if !self.should_commit_to_servers() {
+            self.canonical_render_meshes
+                .entry(surface_class.clone())
+                .or_insert_with(|| CanonicalRenderMeshEntry {
+                    surface_class: surface_class.clone(),
+                    mesh: None,
+                });
+            return Some(Rid::Invalid);
+        }
+
+        if let Some(entry) = self.canonical_render_meshes.get(surface_class) {
+            if let Some(mesh) = entry.mesh.as_ref() {
+                return Some(mesh.get_rid());
+            }
+        }
+
+        let mesh = self.build_canonical_render_mesh(surface_class);
+        let mesh_rid = mesh.get_rid();
+        self.canonical_render_meshes.insert(
+            surface_class.clone(),
+            CanonicalRenderMeshEntry {
+                surface_class: surface_class.clone(),
+                mesh: Some(mesh),
+            },
+        );
+        Some(mesh_rid)
+    }
+
+    fn build_canonical_render_mesh(&self, surface_class: &SurfaceClassKey) -> Gd<ArrayMesh> {
+        let topology = mesh_topology::canonical_chunk_topology();
+        let indices = topology
+            .stitch_indices(surface_class.stitch_mask)
+            .expect("surface class stitch mask must be valid");
+        let quads = mesh_topology::QUADS_PER_EDGE as f32;
+        let vertices = PackedVector3Array::from_iter(
+            (0..mesh_topology::VISIBLE_VERTICES_PER_EDGE).flat_map(|y| {
+                (0..mesh_topology::VISIBLE_VERTICES_PER_EDGE)
+                    .map(move |x| Vector3::new(x as f32 / quads - 0.5, y as f32 / quads - 0.5, 0.0))
+            }),
+        );
+        let uvs = PackedVector2Array::from_iter(
+            (0..mesh_topology::VISIBLE_VERTICES_PER_EDGE).flat_map(|y| {
+                (0..mesh_topology::VISIBLE_VERTICES_PER_EDGE)
+                    .map(move |x| Vector2::new(x as f32 / quads, y as f32 / quads))
+            }),
+        );
+        let indices = PackedInt32Array::from_iter(indices.iter().copied());
+        let arrays = Array::from_iter([
+            vertices.to_variant(),
+            Variant::nil(),
+            Variant::nil(),
+            Variant::nil(),
+            uvs.to_variant(),
+            Variant::nil(),
+            Variant::nil(),
+            Variant::nil(),
+            Variant::nil(),
+            Variant::nil(),
+            Variant::nil(),
+            Variant::nil(),
+            indices.to_variant(),
+        ]);
+
+        let mut mesh = ArrayMesh::new_gd();
+        mesh.add_surface_from_arrays(godot::classes::mesh::PrimitiveType::TRIANGLES, &arrays);
+        mesh
+    }
+
+    fn update_gpu_material_entry(
+        &mut self,
+        key: ChunkKey,
+        chunk_origin_planet: DVec3,
+        render_tile: &ChunkRenderTilePayload,
+        entry: &mut GpuMaterialPoolEntry,
+    ) -> bool {
+        let Some(shader) = self.ensure_terrain_shader() else {
+            return false;
+        };
+
+        let height_image = entry.height_image.take().unwrap_or_else(Image::new_gd);
+        let height_texture = entry
+            .height_texture
+            .take()
+            .unwrap_or_else(ImageTexture::new_gd);
+        let material_image = entry.material_image.take().unwrap_or_else(Image::new_gd);
+        let material_texture = entry
+            .material_texture
+            .take()
+            .unwrap_or_else(ImageTexture::new_gd);
+        let mut shader_material = entry
+            .shader_material
+            .take()
+            .unwrap_or_else(ShaderMaterial::new_gd);
+
+        let Some(height_image) = self.populate_height_image(height_image, render_tile) else {
+            return false;
+        };
+        let Some(material_image) = self.populate_material_image(material_image, render_tile) else {
+            return false;
+        };
+        let height_texture = self.update_image_texture(height_texture, &height_image);
+        let material_texture = self.update_image_texture(material_texture, &material_image);
+        let face_resolution = ChunkKey::resolution_for_lod(key.lod) as f32;
+
+        shader_material.set_shader(&shader);
+        shader_material.set_shader_parameter("height_tile", &height_texture.to_variant());
+        shader_material.set_shader_parameter("material_tile", &material_texture.to_variant());
+        shader_material
+            .set_shader_parameter("planet_radius", &self.config.planet_radius.to_variant());
+        shader_material.set_shader_parameter("face_resolution", &face_resolution.to_variant());
+        shader_material.set_shader_parameter("face_index", &self.face_index(key.face).to_variant());
+        shader_material.set_shader_parameter("chunk_x", &f64::from(key.x).to_variant());
+        shader_material.set_shader_parameter("chunk_y", &f64::from(key.y).to_variant());
+        shader_material.set_shader_parameter(
+            "chunk_origin_planet",
+            &dvec3_to_vector3(chunk_origin_planet).to_variant(),
+        );
+
+        entry.shader_material = Some(shader_material);
+        entry.height_texture = Some(height_texture);
+        entry.material_texture = Some(material_texture);
+        entry.height_image = Some(height_image);
+        entry.material_image = Some(material_image);
+        true
+    }
+
+    fn populate_height_image(
+        &self,
+        mut image: Gd<Image>,
+        render_tile: &ChunkRenderTilePayload,
+    ) -> Option<Gd<Image>> {
+        let mut bytes = PackedByteArray::new();
+        bytes.resize(render_tile.height_tile.len() * std::mem::size_of::<f32>());
+        for (index, value) in render_tile.height_tile.iter().copied().enumerate() {
+            let offset = index * std::mem::size_of::<f32>();
+            bytes
+                .as_mut_slice()
+                .get_mut(offset..offset + std::mem::size_of::<f32>())?
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        image.set_data(
+            render_tile.samples_per_edge as i32,
+            render_tile.samples_per_edge as i32,
+            false,
+            ImageFormat::RF,
+            &bytes,
+        );
+        Some(image)
+    }
+
+    fn populate_material_image(
+        &self,
+        mut image: Gd<Image>,
+        render_tile: &ChunkRenderTilePayload,
+    ) -> Option<Gd<Image>> {
+        let source = render_tile
+            .material_tile
+            .as_ref()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let default_sample = [0.0_f32, 0.0, 0.0, 1.0];
+        let mut bytes = PackedByteArray::new();
+        bytes.resize(render_tile.sample_count() * 4 * std::mem::size_of::<f32>());
+        for index in 0..render_tile.sample_count() {
+            let sample = source.get(index).copied().unwrap_or(default_sample);
+            let offset = index * 4 * std::mem::size_of::<f32>();
+            for (channel, value) in sample.into_iter().enumerate() {
+                let start = offset + channel * std::mem::size_of::<f32>();
+                bytes
+                    .as_mut_slice()
+                    .get_mut(start..start + std::mem::size_of::<f32>())?
+                    .copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        image.set_data(
+            render_tile.samples_per_edge as i32,
+            render_tile.samples_per_edge as i32,
+            false,
+            ImageFormat::RGBAF,
+            &bytes,
+        );
+        Some(image)
+    }
+
+    fn update_image_texture(
+        &self,
+        mut texture: Gd<ImageTexture>,
+        image: &Gd<Image>,
+    ) -> Gd<ImageTexture> {
+        if texture.get_width() == 0 {
+            texture.set_image(image);
+        } else {
+            texture.update(image);
+        }
+        texture
+    }
+
+    fn face_index(&self, face: Face) -> i32 {
+        match face {
+            Face::Px => 0,
+            Face::Nx => 1,
+            Face::Py => 2,
+            Face::Ny => 3,
+            Face::Pz => 4,
+            Face::Nz => 5,
+        }
+    }
+
+    fn chunk_custom_aabb(&self, bounds: ChunkBounds) -> Aabb {
+        let radius = bounds.radius.max(1.0) as f32;
+        Aabb::new(
+            Vector3::new(-radius, -radius, -radius),
+            Vector3::new(radius * 2.0, radius * 2.0, radius * 2.0),
+        )
+    }
+
+    fn take_or_create_gpu_render_instance(&mut self, key: ChunkKey) -> Rid {
+        if let Some(rid) = self
+            .rid_state
+            .get(&key)
+            .and_then(|state| state.render_instance_rid)
+        {
+            return rid;
+        }
+        if let Some(rid) = self.gpu_render_instance_pool.pop_front() {
+            return rid;
+        }
+
+        if self.should_commit_to_servers() {
+            RenderingServer::singleton().instance_create()
+        } else {
+            Rid::Invalid
+        }
+    }
+
+    fn take_current_gpu_render_instance(&mut self, key: ChunkKey) -> Option<Rid> {
+        let rid_state = self.ensure_rid_state(key);
+        let render_instance_rid = rid_state.render_instance_rid.take()?;
+        rid_state.render_resident = false;
+        Some(render_instance_rid)
+    }
+
+    fn recycle_gpu_render_instance(&mut self, render_instance_rid: Rid) {
+        if self.should_commit_to_servers() {
+            let mut rendering_server = RenderingServer::singleton();
+            rendering_server.instance_set_visible(render_instance_rid, false);
+            rendering_server.instance_set_base(render_instance_rid, Rid::Invalid);
+        }
+
+        if self.gpu_render_instance_pool.len() < self.config.render_pool_watermark_per_class {
+            self.gpu_render_instance_pool.push_back(render_instance_rid);
+        } else {
+            self.free_gpu_render_instance(render_instance_rid);
+        }
+    }
+
+    fn free_gpu_render_instance(&mut self, render_instance_rid: Rid) {
+        if self.should_commit_to_servers() && render_instance_rid != Rid::Invalid {
+            RenderingServer::singleton().free_rid(render_instance_rid);
+        }
+    }
+
+    fn pop_gpu_material_entry(
+        &mut self,
+        surface_class: &SurfaceClassKey,
+    ) -> Option<GpuMaterialPoolEntry> {
+        let entries = self.gpu_material_pool.get_mut(surface_class)?;
+        let entry = entries.pop_front();
+        if entries.is_empty() {
+            self.gpu_material_pool.remove(surface_class);
+        }
+        entry
+    }
+
+    fn recycle_gpu_material_entry(&mut self, entry: GpuMaterialPoolEntry) {
+        let entries = self
+            .gpu_material_pool
+            .entry(entry.surface_class.clone())
+            .or_default();
+        if entries.len() < self.config.render_pool_watermark_per_class {
+            entries.push_back(entry);
+        }
+    }
+
+    fn take_active_gpu_material(&mut self, key: ChunkKey) -> Option<GpuMaterialPoolEntry> {
+        self.gpu_active_materials.remove(&key)
     }
 
     fn take_current_physics_entry(&mut self, key: ChunkKey) -> Option<PhysicsPoolEntry> {
@@ -1489,6 +1903,24 @@ impl PlanetRuntime {
                     render_instance_rid,
                     self.render_transform_for_chunk(chunk_origin_planet),
                 );
+                if let Some(bounds) = self
+                    .meta
+                    .get_chunk_meta(
+                        *key,
+                        self.rid_state
+                            .get(key)
+                            .and_then(|state| state.active_surface_class.clone())
+                            .unwrap_or_else(|| self.base_chunk_surface_class().unwrap()),
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|meta| meta.bounds)
+                {
+                    rendering_server.instance_set_custom_aabb(
+                        render_instance_rid,
+                        self.chunk_custom_aabb(bounds),
+                    );
+                }
                 frame_state.phase10_render_transform_rebinds += 1;
             }
             for group in &asset_groups {
@@ -1581,6 +2013,15 @@ impl PlanetRuntime {
                     rendering_server.free_rid(entry.mesh_rid);
                 }
             }
+            for render_instance_rid in self.gpu_render_instance_pool.drain(..) {
+                if render_instance_rid != Rid::Invalid {
+                    rendering_server.free_rid(render_instance_rid);
+                }
+            }
+            self.gpu_active_materials.clear();
+            self.gpu_material_pool.clear();
+            self.canonical_render_meshes.clear();
+            self.terrain_shader = None;
             for entry in self.physics_pool.drain(..) {
                 physics_server.body_set_space(entry.physics_body_rid, Rid::Invalid);
                 physics_server.free_rid(entry.physics_body_rid);
@@ -1618,6 +2059,11 @@ impl PlanetRuntime {
                 rid_state.physics_resident = false;
             }
             self.render_pool.clear();
+            self.gpu_render_instance_pool.clear();
+            self.gpu_active_materials.clear();
+            self.gpu_material_pool.clear();
+            self.canonical_render_meshes.clear();
+            self.terrain_shader = None;
             self.physics_pool.clear();
             self.asset_groups.clear();
             self.asset_family_meshes.clear();

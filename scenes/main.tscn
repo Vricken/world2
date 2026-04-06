@@ -90,6 +90,7 @@ height = 200000.0
 planet_radius = 100000.0
 atmosphere_height = 0.2
 atmosphere_height_follows_terrain_scale = false
+use_gpu_displaced_render_backend = true
 
 [node name="PlanetAtmosphere" parent="." unique_id=1899854573 instance=ExtResource("2_vb2wq")]
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
