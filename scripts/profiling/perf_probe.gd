@@ -114,6 +114,11 @@ func _sample_scenario(
 	var selected_candidates_sum := 0.0
 	var refinement_iterations_sum := 0.0
 	var selection_cap_hits_sum := 0.0
+	var render_residency_sum := 0.0
+	var render_residency_evictions_sum := 0.0
+	var selected_render_starved_sum := 0.0
+	var selected_render_starvation_failures_sum := 0.0
+	var max_selected_render_starvation_frames_sum := 0.0
 
 	while (Time.get_ticks_usec() - fps_elapsed_start_usec) < int(SAMPLE_SECONDS * 1_000_000.0):
 		await get_tree().process_frame
@@ -129,6 +134,15 @@ func _sample_scenario(
 		selected_candidates_sum += float(planet_root.call("runtime_selected_candidates"))
 		refinement_iterations_sum += float(planet_root.call("runtime_refinement_iterations"))
 		selection_cap_hits_sum += float(planet_root.call("runtime_selection_cap_hits"))
+		render_residency_sum += float(planet_root.call("runtime_render_residency_count"))
+		render_residency_evictions_sum += float(planet_root.call("runtime_render_residency_evictions"))
+		selected_render_starved_sum += float(planet_root.call("runtime_selected_render_starved_chunks"))
+		selected_render_starvation_failures_sum += float(
+			planet_root.call("runtime_selected_render_starvation_failures")
+		)
+		max_selected_render_starvation_frames_sum += float(
+			planet_root.call("runtime_max_selected_render_starvation_frames")
+		)
 
 	var elapsed_seconds: float = maxf(
 		float(Time.get_ticks_usec() - fps_elapsed_start_usec) / 1_000_000.0,
@@ -166,6 +180,26 @@ func _sample_scenario(
 	fields.append(
 		"avg_selection_cap_hits=%.4f" %
 		(selection_cap_hits_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_render_residency=%.4f" %
+		(render_residency_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_render_residency_evictions=%.4f" %
+		(render_residency_evictions_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_selected_render_starved=%.4f" %
+		(selected_render_starved_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_selected_render_starvation_failures=%.4f" %
+		(selected_render_starvation_failures_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_selected_render_starvation_frames=%.4f" %
+		(max_selected_render_starvation_frames_sum / max(frame_count, 1))
 	)
 	fields.append(
 		"avg_deferred_upload_mib=%.6f" %

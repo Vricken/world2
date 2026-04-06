@@ -82,6 +82,7 @@ impl PlanetRuntime {
         camera: &CameraState,
         frame_state: &mut SelectionFrameState,
     ) -> Result<(), TopologyError> {
+        self.sync_render_residency(desired_render, camera, frame_state)?;
         let mut ops =
             self.build_commit_ops(desired_render, desired_physics, camera, frame_state)?;
         ops.sort_by(|a, b| {
@@ -233,7 +234,12 @@ impl PlanetRuntime {
             .copied()
             .max()
             .unwrap_or(0);
+        self.update_selected_render_starvation(frame_state);
         self.sync_asset_groups(frame_state)?;
+        frame_state.render_residency_evictions += self.evict_render_residency_entries_to_limit(
+            self.render_residency_soft_limit(desired_render.len()),
+        );
+        frame_state.render_residency_entries = self.render_residency.len();
         frame_state.render_pool_entries = self.render_pool_entry_count();
         frame_state.physics_pool_entries = self.physics_pool.len();
         let asset_debug = self.asset_debug_snapshot();
@@ -241,6 +247,199 @@ impl PlanetRuntime {
         frame_state.phase12_active_instances = asset_debug.active_instances;
 
         Ok(())
+    }
+
+    fn sync_render_residency(
+        &mut self,
+        desired_render: &HashSet<ChunkKey>,
+        camera: &CameraState,
+        frame_state: &mut SelectionFrameState,
+    ) -> Result<(), TopologyError> {
+        let tick = frame_state.tick;
+        let existing_keys = self.render_residency.keys().copied().collect::<Vec<_>>();
+        for key in existing_keys {
+            let active = self.active_render.contains(&key);
+            let entry = self
+                .render_residency
+                .get_mut(&key)
+                .expect("existing residency key must be present");
+            entry.active = active;
+            if !desired_render.contains(&key) {
+                if entry.desired {
+                    entry.last_unused_tick = tick;
+                }
+                entry.desired = false;
+                entry.required_surface_class = None;
+            }
+        }
+
+        let desired_keys = desired_render.iter().copied().collect::<Vec<_>>();
+        for key in desired_keys {
+            let required_surface_class =
+                self.required_surface_class_for_selection(key, desired_render)?;
+            let meta = self.ensure_chunk_meta(key)?;
+            let error_px = self.projected_error_px(camera, &meta);
+            let distance_key_mm = distance_sort_key(self.chunk_camera_distance(camera, &meta));
+            let active = self.active_render.contains(&key);
+            let resident_surface_class = self
+                .resident_payloads
+                .get(&key)
+                .map(|payload| payload.surface_class.clone());
+            let entry = self.render_residency.entry(key).or_default();
+            entry.desired = true;
+            entry.active = active;
+            entry.required_surface_class = Some(required_surface_class);
+            entry.resident_surface_class =
+                resident_surface_class.or(entry.resident_surface_class.clone());
+            entry.last_selected_tick = tick;
+            entry.refinement_benefit_px = (error_px - self.config.split_threshold_px).max(0.0);
+            entry.distance_key_mm = distance_key_mm;
+        }
+
+        frame_state.render_residency_entries = self.render_residency.len();
+        frame_state.render_residency_evictions +=
+            self.evict_render_residency_entries_to_limit(self.config.hard_render_chunk_cap);
+        frame_state.render_residency_entries = self.render_residency.len();
+        Ok(())
+    }
+
+    fn render_residency_soft_limit(&self, desired_render_count: usize) -> usize {
+        desired_render_count
+            .max(self.config.target_render_chunks)
+            .min(self.config.hard_render_chunk_cap)
+    }
+
+    pub(crate) fn evict_render_residency_entries_to_limit(&mut self, limit: usize) -> usize {
+        if self.render_residency.len() <= limit {
+            return 0;
+        }
+
+        let mut eviction_candidates = self
+            .render_residency
+            .iter()
+            .filter_map(|(key, entry)| {
+                if entry.desired
+                    || entry.active
+                    || self.active_physics.contains(key)
+                    || self.pending_payload_requests.contains_key(key)
+                {
+                    return None;
+                }
+
+                Some((
+                    *key,
+                    entry.refinement_benefit_px,
+                    entry.distance_key_mm,
+                    entry.last_unused_tick,
+                ))
+            })
+            .collect::<Vec<_>>();
+        eviction_candidates.sort_by(|a, b| {
+            a.1.total_cmp(&b.1)
+                .then(b.2.cmp(&a.2))
+                .then(a.3.cmp(&b.3))
+                .then(a.0.cmp(&b.0))
+        });
+
+        let mut evicted = 0usize;
+        let mut current_count = self.render_residency.len();
+        for (key, ..) in eviction_candidates {
+            if current_count <= limit {
+                break;
+            }
+
+            self.pending_payload_requests.remove(&key);
+            self.remove_payload(&key);
+            self.render_residency.remove(&key);
+            self.deferred_starvation
+                .retain(|deferred_key, _| deferred_key.key != key);
+            current_count = current_count.saturating_sub(1);
+            evicted += 1;
+        }
+
+        evicted
+    }
+
+    fn payload_matches_residency_entry(&self, key: ChunkKey, entry: &RenderResidencyEntry) -> bool {
+        let Some(required_surface_class) = entry.required_surface_class.as_ref() else {
+            return false;
+        };
+
+        self.resident_payloads
+            .get(&key)
+            .map(|payload| {
+                payload.surface_class == *required_surface_class && payload.packed_regions.is_some()
+            })
+            .unwrap_or(false)
+    }
+
+    fn render_entry_needs_refresh(&self, key: ChunkKey, entry: &RenderResidencyEntry) -> bool {
+        !self.payload_matches_residency_entry(key, entry)
+    }
+
+    fn selected_render_service_satisfied(
+        &self,
+        key: ChunkKey,
+        entry: &RenderResidencyEntry,
+    ) -> bool {
+        if !entry.desired || !entry.active || !self.active_render.contains(&key) {
+            return false;
+        }
+
+        let render_resident = self
+            .rid_state
+            .get(&key)
+            .map(|state| state.render_resident)
+            .unwrap_or(false);
+        render_resident && self.payload_matches_residency_entry(key, entry)
+    }
+
+    fn update_selected_render_starvation(&mut self, frame_state: &mut SelectionFrameState) {
+        let keys = self.render_residency.keys().copied().collect::<Vec<_>>();
+        let mut starved_chunks = 0usize;
+        let mut starvation_failures = 0usize;
+        let mut max_starvation_frames = 0u32;
+
+        for key in keys {
+            let satisfied = self
+                .render_residency
+                .get(&key)
+                .map(|entry| self.selected_render_service_satisfied(key, entry))
+                .unwrap_or(false);
+            let entry = self
+                .render_residency
+                .get_mut(&key)
+                .expect("residency entry must exist while updating starvation");
+
+            if !entry.desired {
+                entry.selected_starvation_frames = 0;
+                entry.starvation_failure_reported = false;
+                continue;
+            }
+
+            if satisfied {
+                entry.selected_starvation_frames = 0;
+                entry.starvation_failure_reported = false;
+                entry.last_service_tick = Some(frame_state.tick);
+                continue;
+            }
+
+            entry.selected_starvation_frames = entry.selected_starvation_frames.saturating_add(1);
+            starved_chunks += 1;
+            max_starvation_frames = max_starvation_frames.max(entry.selected_starvation_frames);
+            if entry.selected_starvation_frames > DEFAULT_RENDER_SERVICE_STARVATION_LIMIT_FRAMES
+                && !entry.starvation_failure_reported
+            {
+                entry.starvation_failure_reported = true;
+            }
+            if entry.starvation_failure_reported {
+                starvation_failures += 1;
+            }
+        }
+
+        frame_state.selected_render_starved_chunks = starved_chunks;
+        frame_state.selected_render_starvation_failures = starvation_failures;
+        frame_state.max_selected_render_starvation_frames = max_starvation_frames;
     }
 
     fn build_commit_ops(
@@ -252,40 +451,50 @@ impl PlanetRuntime {
     ) -> Result<Vec<CommitOp>, TopologyError> {
         let mut ops = Vec::new();
 
-        let mut render_activations = desired_render
-            .difference(&self.active_render)
-            .copied()
-            .collect::<Vec<_>>();
-        render_activations.sort_unstable();
-
-        let mut render_updates = desired_render
-            .intersection(&self.active_render)
-            .copied()
+        let mut render_updates = self
+            .render_residency
+            .iter()
+            .filter_map(|(key, entry)| (entry.desired && entry.active).then_some(*key))
             .collect::<Vec<_>>();
         render_updates.sort_unstable();
 
+        let mut render_activations = self
+            .render_residency
+            .iter()
+            .filter_map(|(key, entry)| (entry.desired && !entry.active).then_some(*key))
+            .collect::<Vec<_>>();
+        render_activations.sort_unstable();
+
         let mut refresh_keys = render_activations.clone();
-        for key in render_updates.iter().copied() {
-            let required_surface_class =
-                self.required_surface_class_for_selection(key, desired_render)?;
-            let needs_refresh = self
-                .resident_payloads
-                .get(&key)
-                .map(|payload| payload.surface_class != required_surface_class)
-                .unwrap_or(true);
-            if needs_refresh {
-                refresh_keys.push(key);
-            }
-        }
+        refresh_keys.extend(render_updates.iter().copied().filter(|key| {
+            self.render_residency
+                .get(key)
+                .map(|entry| self.render_entry_needs_refresh(*key, entry))
+                .unwrap_or(true)
+        }));
         self.request_render_payloads_for_selection(&refresh_keys, desired_render, frame_state)?;
         self.drain_ready_render_payloads(frame_state);
 
-        for key in render_activations {
-            if !self.payload_matches_selection(key, desired_render)? {
+        for key in render_updates {
+            let needs_refresh = self
+                .render_residency
+                .get(&key)
+                .map(|entry| self.render_entry_needs_refresh(key, entry))
+                .unwrap_or(true);
+            if !needs_refresh {
                 continue;
             }
+            if !self
+                .render_residency
+                .get(&key)
+                .map(|entry| self.payload_matches_residency_entry(key, entry))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
             ops.push(CommitOp {
-                kind: CommitOpKind::ActivateRender,
+                kind: CommitOpKind::UpdateRender,
                 key,
                 upload_bytes: self.payload_upload_bytes(key),
                 priority_group: 0,
@@ -295,23 +504,17 @@ impl PlanetRuntime {
             });
         }
 
-        for key in render_updates {
-            let required_surface_class =
-                self.required_surface_class_for_selection(key, desired_render)?;
-            let needs_refresh = self
-                .resident_payloads
+        for key in render_activations {
+            if !self
+                .render_residency
                 .get(&key)
-                .map(|payload| payload.surface_class != required_surface_class)
-                .unwrap_or(true);
-            if !needs_refresh {
+                .map(|entry| self.payload_matches_residency_entry(key, entry))
+                .unwrap_or(false)
+            {
                 continue;
             }
-            if !self.payload_matches_selection(key, desired_render)? {
-                continue;
-            }
-
             ops.push(CommitOp {
-                kind: CommitOpKind::UpdateRender,
+                kind: CommitOpKind::ActivateRender,
                 key,
                 upload_bytes: self.payload_upload_bytes(key),
                 priority_group: 1,
@@ -342,9 +545,9 @@ impl PlanetRuntime {
         }
 
         let mut render_deactivations = self
-            .active_render
-            .difference(desired_render)
-            .copied()
+            .render_residency
+            .iter()
+            .filter_map(|(key, entry)| (!entry.desired && entry.active).then_some(*key))
             .collect::<Vec<_>>();
         render_deactivations.sort_unstable();
         for key in render_deactivations {
@@ -393,11 +596,17 @@ impl PlanetRuntime {
                 if self.commit_render_payload(op.key, frame_state) {
                     self.active_render.insert(op.key);
                     self.ensure_rid_state(op.key).render_resident = true;
+                    if let Some(entry) = self.render_residency.get_mut(&op.key) {
+                        entry.active = true;
+                    }
                     self.asset_groups_dirty = true;
                     true
                 } else {
                     self.active_render.remove(&op.key);
                     self.ensure_rid_state(op.key).render_resident = false;
+                    if let Some(entry) = self.render_residency.get_mut(&op.key) {
+                        entry.active = false;
+                    }
                     self.asset_groups_dirty = true;
                     false
                 }
@@ -406,6 +615,9 @@ impl PlanetRuntime {
                 if self.commit_render_payload(op.key, frame_state) {
                     self.active_render.insert(op.key);
                     self.ensure_rid_state(op.key).render_resident = true;
+                    if let Some(entry) = self.render_residency.get_mut(&op.key) {
+                        entry.active = true;
+                    }
                     self.asset_groups_dirty = true;
                     true
                 } else {
@@ -417,11 +629,17 @@ impl PlanetRuntime {
                     if still_has_render_entry {
                         self.active_render.insert(op.key);
                         self.ensure_rid_state(op.key).render_resident = true;
+                        if let Some(entry) = self.render_residency.get_mut(&op.key) {
+                            entry.active = true;
+                        }
                         self.asset_groups_dirty = true;
                         true
                     } else {
                         self.active_render.remove(&op.key);
                         self.ensure_rid_state(op.key).render_resident = false;
+                        if let Some(entry) = self.render_residency.get_mut(&op.key) {
+                            entry.active = false;
+                        }
                         self.asset_groups_dirty = true;
                         false
                     }
@@ -431,6 +649,9 @@ impl PlanetRuntime {
                 self.deactivate_render_commit(op.key);
                 self.active_render.remove(&op.key);
                 self.ensure_rid_state(op.key).render_resident = false;
+                if let Some(entry) = self.render_residency.get_mut(&op.key) {
+                    entry.active = false;
+                }
                 self.asset_groups_dirty = true;
                 true
             }

@@ -206,6 +206,23 @@ fn asset_group_summary(runtime: &PlanetRuntime) -> Vec<(AssetGroupKey, usize, Ve
     summary
 }
 
+fn simple_render_residency_entry(
+    desired: bool,
+    active: bool,
+    refinement_benefit_px: f32,
+    distance_key_mm: u64,
+    last_unused_tick: u64,
+) -> RenderResidencyEntry {
+    RenderResidencyEntry {
+        desired,
+        active,
+        refinement_benefit_px,
+        distance_key_mm,
+        last_unused_tick,
+        ..RenderResidencyEntry::default()
+    }
+}
+
 #[test]
 fn chunk_key_validates_coords_against_lod_resolution() {
     assert!(ChunkKey::new(Face::Px, 3, 7, 7).is_valid_for_lod());
@@ -1662,6 +1679,157 @@ fn payload_residency_budget_stays_bounded_under_mock_camera_churn() {
             .iter()
             .all(|key| runtime.resident_payloads.contains_key(key)));
     }
+}
+
+#[test]
+fn phase2_render_residency_entries_remain_stable_across_repeated_frames() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera = orbit_camera_state();
+
+    step_runtime_until_streaming_settles(&mut runtime, &camera, 40);
+    let first_keys = runtime
+        .render_residency
+        .keys()
+        .copied()
+        .collect::<HashSet<_>>();
+    let first_count = runtime.render_residency_count();
+
+    step_runtime_until_streaming_settles(&mut runtime, &camera, 10);
+    let second_keys = runtime
+        .render_residency
+        .keys()
+        .copied()
+        .collect::<HashSet<_>>();
+
+    assert_eq!(runtime.render_residency_count(), first_count);
+    assert_eq!(first_keys, second_keys);
+    assert!(runtime
+        .active_render
+        .iter()
+        .all(|key| runtime.render_residency.contains_key(key)));
+}
+
+#[test]
+fn phase2_render_residency_eviction_prefers_lower_benefit_then_farther_then_older_unused() {
+    let mut runtime = test_runtime();
+    let keep = ChunkKey::new(Face::Px, 2, 0, 0);
+    let evict = ChunkKey::new(Face::Px, 2, 1, 0);
+    let high_benefit = ChunkKey::new(Face::Px, 2, 2, 0);
+
+    runtime.render_residency.insert(
+        keep,
+        simple_render_residency_entry(false, false, 0.0, 100, 5),
+    );
+    runtime.render_residency.insert(
+        evict,
+        simple_render_residency_entry(false, false, 0.0, 200, 10),
+    );
+    runtime.render_residency.insert(
+        high_benefit,
+        simple_render_residency_entry(false, false, 1.0, 1_000, 1),
+    );
+
+    let evictions = runtime.evict_render_residency_entries_to_limit(2);
+
+    assert_eq!(evictions, 1);
+    assert!(!runtime.render_residency.contains_key(&evict));
+    assert!(runtime.render_residency.contains_key(&keep));
+    assert!(runtime.render_residency.contains_key(&high_benefit));
+}
+
+#[test]
+fn phase2_selected_render_service_precedes_render_deactivation_when_budget_is_tight() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            commit_budget_per_frame: 1,
+            render_activation_budget_per_frame: 1,
+            render_update_budget_per_frame: 0,
+            render_deactivation_budget_per_frame: 1,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let stale_key = ChunkKey::new(Face::Pz, 2, 0, 0);
+    let selected_key = ChunkKey::new(Face::Pz, 2, 1, 0);
+    let stale_render = [stale_key].into_iter().collect::<HashSet<_>>();
+    let selected_render = [selected_key].into_iter().collect::<HashSet<_>>();
+    let camera = orbit_camera_state();
+    let mut frame_state = SelectionFrameState {
+        tick: 1,
+        ..SelectionFrameState::default()
+    };
+
+    runtime
+        .ensure_render_payload_for_selection(stale_key, &stale_render, &mut frame_state)
+        .unwrap();
+    runtime
+        .ensure_render_payload_for_selection(selected_key, &selected_render, &mut frame_state)
+        .unwrap();
+    runtime.active_render.insert(stale_key);
+    runtime.ensure_rid_state(stale_key).render_resident = true;
+    runtime.render_residency.insert(
+        stale_key,
+        RenderResidencyEntry {
+            active: true,
+            resident_surface_class: runtime
+                .resident_payloads
+                .get(&stale_key)
+                .map(|payload| payload.surface_class.clone()),
+            ..RenderResidencyEntry::default()
+        },
+    );
+
+    runtime
+        .apply_budgeted_diffs(
+            &selected_render,
+            &HashSet::<ChunkKey>::new(),
+            &camera,
+            &mut frame_state,
+        )
+        .unwrap();
+
+    assert!(runtime.active_render.contains(&selected_key));
+    assert!(runtime.active_render.contains(&stale_key));
+    assert!(frame_state.deferred_commit_ops > 0);
+}
+
+#[test]
+fn phase2_selected_render_starvation_records_failure_after_service_limit() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: 0,
+            enable_godot_staging: false,
+            commit_budget_per_frame: 0,
+            render_activation_budget_per_frame: 0,
+            render_update_budget_per_frame: 0,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera = orbit_camera_state();
+
+    for _ in 0..=(DEFAULT_RENDER_SERVICE_STARVATION_LIMIT_FRAMES + 10) {
+        runtime.step_visibility_selection(&camera).unwrap();
+    }
+
+    assert!(runtime.frame_state.selected_render_starved_chunks > 0);
+    assert!(
+        runtime.frame_state.max_selected_render_starvation_frames
+            > DEFAULT_RENDER_SERVICE_STARVATION_LIMIT_FRAMES
+    );
+    assert!(runtime.frame_state.selected_render_starvation_failures > 0);
 }
 
 #[test]

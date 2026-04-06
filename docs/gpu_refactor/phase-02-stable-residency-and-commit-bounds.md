@@ -49,45 +49,46 @@ Phase 02 should make the runtime behave like a bounded cache with predictable se
 - Stable residency entries should own the render lifecycle state even if the payload contents still come from CPU-built meshes.
 - Selected chunks must always outrank speculative admissions once the system is under pressure.
 - Preserve coverage-safe deactivation behavior while moving it onto the new residency model.
+- Treat `target_render_chunks = 160` as the steady-state residency target and `hard_render_chunk_cap = 224` as the absolute cache ceiling. The residency table may temporarily sit above the soft target when the selected set itself exceeds `160` or when hole-safe transitions still need both old and new coverage, but the residency system now trims unselected inactive entries back toward the target explicitly.
 
 ## Checklist
 
-- [ ] Stable render residency entry type exists and is keyed by chunk.
-- [ ] Target and hard caps are enforced by the residency system, not only by selection.
-- [ ] Eviction ordering is implemented and documented.
-- [ ] Selected-chunk service outranks speculative admits.
-- [ ] Deferred work tracking includes starvation age for selected chunks.
-- [ ] Coverage-safe deactivation still prevents holes.
-- [ ] Runtime diagnostics expose residency counts, evictions, and starvation behavior.
-- [ ] README and phase notes describe the new bounded-residency model.
+- [x] Stable render residency entry type exists and is keyed by chunk.
+- [x] Target and hard caps are enforced by the residency system, not only by selection.
+- [x] Eviction ordering is implemented and documented.
+- [x] Selected-chunk service outranks speculative admits.
+- [x] Deferred work tracking includes starvation age for selected chunks.
+- [x] Coverage-safe deactivation still prevents holes.
+- [x] Runtime diagnostics expose residency counts, evictions, and starvation behavior.
+- [x] README and phase notes describe the new bounded-residency model.
 
 ## Ordered Build Steps
 
-1. [ ] Introduce stable render residency entries and cache ownership.
-2. [ ] Route existing commit ops through the stable residency state.
-3. [ ] Implement admission and eviction ordering.
-4. [ ] Enforce starvation accounting and selected-first servicing.
-5. [ ] Extend runtime logs and probe output with residency metrics.
+1. [x] Introduce stable render residency entries and cache ownership.
+2. [x] Route existing commit ops through the stable residency state.
+3. [x] Implement admission and eviction ordering.
+4. [x] Enforce starvation accounting and selected-first servicing.
+5. [x] Extend runtime logs and probe output with residency metrics.
 
 ## Validation and Test Gates
 
-- [ ] Unit coverage proves stable entry reuse across repeated selection frames.
-- [ ] Unit coverage proves eviction ordering.
-- [ ] Unit coverage proves selected chunks are serviced before speculative work.
-- [ ] Unit coverage proves deferred selected chunks do not starve past the steady-state budget without a recorded failure signal.
+- [x] Unit coverage proves stable entry reuse across repeated selection frames.
+- [x] Unit coverage proves eviction ordering.
+- [x] Unit coverage proves selected chunks are serviced before speculative work.
+- [x] Unit coverage proves deferred selected chunks do not starve past the steady-state budget without a recorded failure signal.
 - [ ] Fast camera motion does not open terrain holes.
-- [ ] Deferred commit backlog remains bounded and drains predictably.
+- [x] Deferred commit backlog remains bounded and drains predictably.
 
 ## Definition of Done
 
-- [ ] Render residency has explicit steady-state bounds independent of per-frame upload opportunities.
-- [ ] Commit behavior is predictable enough to support the later GPU tile cutover.
+- [x] Render residency has explicit steady-state bounds independent of per-frame upload opportunities.
+- [x] Commit behavior is predictable enough to support the later GPU tile cutover.
 - [ ] The runtime remains correct on the current CPU render backend.
 
 ## Test Record
 
-- [ ] Date:
-- [ ] Result summary:
-- [ ] Residency and starvation observations:
-- [ ] Deviations:
-- [ ] Follow-up actions:
+- [x] Date: 2026-04-06
+- [x] Result summary: `cargo test` passed `77/77`; `./scripts/build_rust.sh` built successfully; `./scripts/run_godot.sh --headless --quit-after 5` loaded the updated extension and on the first headless tick logged `render_residency=124`, `render_residency_evictions=0`, `selected_render_starved=124`, `selected_render_starvation_failures=0`, and `selected_render_starvation_frames=1` while the initial render set was still waiting on prepared payloads.
+- [x] Residency and starvation observations: `./scripts/profile_window_modes.sh` reported `small_window` at `1728 x 1116` with `avg_render_residency=166.0208`, `avg_render_residency_evictions=0.9043`, `avg_selected_render_starved=2.1540`, `avg_selected_render_starvation_failures=0.0000`, `avg_selected_render_starvation_frames=0.3842`, and `avg_deferred_commits=0.8044`. `fullscreen_native` at `3456 x 2168` reported `avg_render_residency=160.1433`, `avg_render_residency_evictions=0.6328`, `avg_selected_render_starved=1.4381`, `avg_selected_render_starvation_failures=0.0000`, `avg_selected_render_starvation_frames=0.2670`, and `avg_deferred_commits=0.4618`. In both cases the backlog stayed bounded and no selected chunk crossed the `30`-frame starvation limit.
+- [x] Deviations: the residency table is explicitly soft-bounded at `160` and hard-bounded at `224`, so it can legitimately average above `160` when the selected render set itself is larger than the target or when hole-safe replacement keeps both generations resident briefly. Phase 02 was also implemented before a separately recorded interactive visual sign-off for Phase 01's near-player-detail check, so the prior visual follow-up remains open.
+- [x] Follow-up actions: do an interactive fast-traversal visual pass to confirm hole-free behavior and CPU-backend correctness under camera motion, then proceed to Phase 03 with the Phase 02 residency counters as the new baseline.

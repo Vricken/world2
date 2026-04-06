@@ -815,6 +815,39 @@ pub struct ChunkRidState {
     pub pooled_surface_class: Option<SurfaceClassKey>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderResidencyEntry {
+    pub desired: bool,
+    pub active: bool,
+    pub required_surface_class: Option<SurfaceClassKey>,
+    pub resident_surface_class: Option<SurfaceClassKey>,
+    pub last_selected_tick: u64,
+    pub last_service_tick: Option<u64>,
+    pub last_unused_tick: u64,
+    pub refinement_benefit_px: f32,
+    pub distance_key_mm: u64,
+    pub selected_starvation_frames: u32,
+    pub starvation_failure_reported: bool,
+}
+
+impl Default for RenderResidencyEntry {
+    fn default() -> Self {
+        Self {
+            desired: false,
+            active: false,
+            required_surface_class: None,
+            resident_surface_class: None,
+            last_selected_tick: 0,
+            last_service_tick: None,
+            last_unused_tick: 0,
+            refinement_benefit_px: 0.0,
+            distance_key_mm: u64::MAX,
+            selected_starvation_frames: 0,
+            starvation_failure_reported: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeamDebugSnapshot {
     pub active_render_chunks: usize,

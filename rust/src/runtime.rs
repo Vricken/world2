@@ -63,6 +63,7 @@ pub const DEFAULT_UPLOAD_BUDGET_BYTES_PER_FRAME: usize = 1 * 1024 * 1024;
 pub const DEFAULT_RENDER_ACTIVATION_BUDGET_PER_FRAME: usize = 6;
 pub const DEFAULT_RENDER_UPDATE_BUDGET_PER_FRAME: usize = 4;
 pub const DEFAULT_RENDER_DEACTIVATION_BUDGET_PER_FRAME: usize = 8;
+pub const DEFAULT_RENDER_SERVICE_STARVATION_LIMIT_FRAMES: u32 = 30;
 pub const DEFAULT_PHYSICS_ACTIVATION_BUDGET_PER_FRAME: usize = 2;
 pub const DEFAULT_PHYSICS_DEACTIVATION_BUDGET_PER_FRAME: usize = 4;
 pub const DEFAULT_RENDER_MATERIAL_CLASS: u8 = 0;
@@ -285,6 +286,7 @@ pub struct PlanetRuntime {
     pub meta: MetadataStore,
     pub active_render: HashSet<ChunkKey>,
     pub active_physics: HashSet<ChunkKey>,
+    pub render_residency: HashMap<ChunkKey, RenderResidencyEntry>,
     pub resident_payloads: HashMap<ChunkKey, ChunkPayload>,
     pub rid_state: HashMap<ChunkKey, ChunkRidState>,
     pub render_pool: HashMap<SurfaceClassKey, VecDeque<RenderPoolEntry>>,

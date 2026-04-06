@@ -9,6 +9,11 @@ pub struct SelectionFrameState {
     pub tick: u64,
     pub desired_render_count: usize,
     pub desired_physics_count: usize,
+    pub render_residency_entries: usize,
+    pub render_residency_evictions: usize,
+    pub selected_render_starved_chunks: usize,
+    pub selected_render_starvation_failures: usize,
+    pub max_selected_render_starvation_frames: u32,
     pub horizon_survivor_count: usize,
     pub frustum_survivor_count: usize,
     pub selected_candidates: usize,
@@ -1346,8 +1351,9 @@ impl PlanetRuntime {
             collider_faces,
             render_lifecycle,
         };
-        if let Some(previous_payload) = self.resident_payloads.insert(key, payload) {
-            self.reclaim_payload_resources(previous_payload);
+        self.insert_payload(key, payload);
+        if let Some(entry) = self.render_residency.get_mut(&key) {
+            entry.resident_surface_class = Some(surface_class);
         }
         if self.active_render.contains(&key) {
             self.asset_groups_dirty = true;

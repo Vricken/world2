@@ -25,6 +25,7 @@ impl PlanetRuntime {
             meta: MetadataStore::new(runtime_max_lod, dense_metadata_max_lod),
             active_render: HashSet::new(),
             active_physics: HashSet::new(),
+            render_residency: HashMap::new(),
             resident_payloads: HashMap::new(),
             rid_state: HashMap::new(),
             render_pool: HashMap::new(),
@@ -177,6 +178,9 @@ impl PlanetRuntime {
     }
 
     pub fn insert_payload(&mut self, key: ChunkKey, payload: ChunkPayload) -> Option<ChunkPayload> {
+        if let Some(entry) = self.render_residency.get_mut(&key) {
+            entry.resident_surface_class = Some(payload.surface_class.clone());
+        }
         let previous = self.resident_payloads.insert(key, payload);
         if let Some(payload) = previous.as_ref().cloned() {
             self.reclaim_payload_resources(payload);
@@ -185,6 +189,9 @@ impl PlanetRuntime {
     }
 
     pub fn remove_payload(&mut self, key: &ChunkKey) -> Option<ChunkPayload> {
+        if let Some(entry) = self.render_residency.get_mut(key) {
+            entry.resident_surface_class = None;
+        }
         let removed = self.resident_payloads.remove(key);
         if let Some(payload) = removed.as_ref().cloned() {
             self.reclaim_payload_resources(payload);
@@ -337,6 +344,10 @@ impl PlanetRuntime {
 
     pub fn resident_payload_count(&self) -> usize {
         self.resident_payloads.len()
+    }
+
+    pub fn render_residency_count(&self) -> usize {
+        self.render_residency.len()
     }
 
     pub fn rid_state_count(&self) -> usize {
