@@ -11,7 +11,6 @@ uniform float chunk_y = 0.0;
 uniform vec3 chunk_origin_planet = vec3(0.0);
 
 varying vec2 v_chunk_uv;
-varying vec3 v_local_normal;
 
 vec3 face_normal(int face) {
 	if (face == 0) {
@@ -81,15 +80,17 @@ vec3 displaced_point(vec2 chunk_uv) {
 
 void vertex() {
 	v_chunk_uv = UV;
+	float uv_step = 1.0 / 32.0;
 	vec3 center_planet = displaced_point(UV);
-	vec3 du_planet = displaced_point(clamp(UV + vec2(1.0 / 32.0, 0.0), vec2(0.0), vec2(1.0)));
-	vec3 dv_planet = displaced_point(clamp(UV + vec2(0.0, 1.0 / 32.0), vec2(0.0), vec2(1.0)));
+	vec3 left_planet = displaced_point(clamp(UV - vec2(uv_step, 0.0), vec2(-uv_step), vec2(1.0 + uv_step)));
+	vec3 right_planet = displaced_point(clamp(UV + vec2(uv_step, 0.0), vec2(-uv_step), vec2(1.0 + uv_step)));
+	vec3 down_planet = displaced_point(clamp(UV - vec2(0.0, uv_step), vec2(-uv_step), vec2(1.0 + uv_step)));
+	vec3 up_planet = displaced_point(clamp(UV + vec2(0.0, uv_step), vec2(-uv_step), vec2(1.0 + uv_step)));
 	vec3 local_center = center_planet - chunk_origin_planet;
-	vec3 local_du = du_planet - chunk_origin_planet;
-	vec3 local_dv = dv_planet - chunk_origin_planet;
-	v_local_normal = normalize(cross(local_du - local_center, local_dv - local_center));
+	vec3 tangent_u = normalize(right_planet - left_planet);
+	vec3 tangent_v = normalize(up_planet - down_planet);
 	VERTEX = local_center;
-	NORMAL = v_local_normal;
+	NORMAL = normalize(cross(tangent_u, tangent_v));
 }
 
 void fragment() {
@@ -99,7 +100,6 @@ void fragment() {
 	vec3 rocky = vec3(0.48, 0.48, 0.50);
 	vec3 biome_mix = mix(lowland, upland, clamp(material_sample.y, 0.0, 1.0));
 	ALBEDO = mix(biome_mix, rocky, clamp(material_sample.z, 0.0, 1.0));
-	NORMAL = normalize(v_local_normal);
 	ROUGHNESS = 0.96;
 	SPECULAR = 0.1;
 }

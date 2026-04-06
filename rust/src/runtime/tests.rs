@@ -139,6 +139,16 @@ fn local_position_to_dvec3(position: [f32; 3]) -> DVec3 {
     )
 }
 
+fn aabb_contains_point(aabb: Aabb, point: Vector3) -> bool {
+    let end = aabb.position + aabb.size;
+    point.x >= aabb.position.x
+        && point.x <= end.x
+        && point.y >= aabb.position.y
+        && point.y <= end.y
+        && point.z >= aabb.position.z
+        && point.z <= end.z
+}
+
 fn chunk_count_through_lod(max_lod: u8) -> usize {
     (0..=max_lod)
         .map(|lod| Face::ALL.len() * (ChunkKey::resolution_for_lod(lod) as usize).pow(2))
@@ -2685,4 +2695,35 @@ fn phase4_gpu_backend_does_not_require_cpu_render_mesh_bytes_for_activation() {
     assert!(runtime.commit_render_payload(key, &mut frame_state));
     assert!(runtime.ensure_rid_state(key).render_resident);
     assert_eq!(frame_state.phase4_gpu_material_binds, 1);
+}
+
+#[test]
+fn phase4_gpu_custom_aabb_contains_visible_chunk_vertices() {
+    let mut runtime = test_gpu_runtime();
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
+
+    runtime
+        .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+        .unwrap();
+
+    let payload = runtime.resident_payloads.get(&key).unwrap().clone();
+    let meta = runtime.ensure_chunk_meta(key).unwrap();
+    let aabb = runtime
+        .gpu_chunk_custom_aabb(
+            key,
+            payload.chunk_origin_planet,
+            &payload.render_tile,
+            meta.metrics.geometric_error,
+        )
+        .unwrap();
+
+    for position in &payload.mesh.positions {
+        let local = Vector3::new(position[0], position[1], position[2]);
+        assert!(
+            aabb_contains_point(aabb, local),
+            "gpu custom aabb missed visible vertex {local:?} for {key:?}: {aabb:?}"
+        );
+    }
 }

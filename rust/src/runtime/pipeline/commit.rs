@@ -883,7 +883,7 @@ impl PlanetRuntime {
         key: ChunkKey,
         frame_state: &mut SelectionFrameState,
     ) -> bool {
-        let (surface_class, chunk_origin_planet, render_tile, chunk_bounds) = {
+        let (surface_class, chunk_origin_planet, render_tile, chunk_bounds, geometric_error) = {
             let Some(payload) = self.resident_payloads.get(&key) else {
                 return false;
             };
@@ -894,7 +894,13 @@ impl PlanetRuntime {
             let Ok(meta) = self.ensure_chunk_meta(key) else {
                 return false;
             };
-            (surface_class, chunk_origin_planet, render_tile, meta.bounds)
+            (
+                surface_class,
+                chunk_origin_planet,
+                render_tile,
+                meta.bounds,
+                meta.metrics.geometric_error,
+            )
         };
 
         if render_tile.validate_layout().is_err() {
@@ -919,6 +925,9 @@ impl PlanetRuntime {
             self.recycle_gpu_material_entry(material_entry);
             return false;
         };
+        let chunk_aabb = self
+            .gpu_chunk_custom_aabb(key, chunk_origin_planet, &render_tile, geometric_error)
+            .unwrap_or_else(|| self.chunk_custom_aabb(chunk_bounds));
 
         if self.should_commit_to_servers() {
             if !self.update_gpu_material_entry(
@@ -949,10 +958,7 @@ impl PlanetRuntime {
                 0,
                 material_rid,
             );
-            rendering_server.instance_set_custom_aabb(
-                render_instance_rid,
-                self.chunk_custom_aabb(chunk_bounds),
-            );
+            rendering_server.instance_set_custom_aabb(render_instance_rid, chunk_aabb);
             rendering_server.instance_set_visible(render_instance_rid, true);
         }
 
@@ -1430,6 +1436,51 @@ impl PlanetRuntime {
         )
     }
 
+    pub(crate) fn gpu_chunk_custom_aabb(
+        &self,
+        key: ChunkKey,
+        chunk_origin_planet: DVec3,
+        render_tile: &ChunkRenderTilePayload,
+        geometric_error: f32,
+    ) -> Option<Aabb> {
+        if render_tile.validate_layout().is_err()
+            || render_tile.samples_per_edge != mesh_topology::SAMPLED_VERTICES_PER_EDGE
+        {
+            return None;
+        }
+
+        let visible_last = mesh_topology::QUADS_PER_EDGE;
+        let border = mesh_topology::BORDER_RING_QUADS;
+        let mut min = Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut max = Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+        for y in 0..=visible_last {
+            for x in 0..=visible_last {
+                let chunk_uv = DVec2::new(
+                    f64::from(x) / f64::from(visible_last),
+                    f64::from(y) / f64::from(visible_last),
+                );
+                let face_uv = chunk_uv_to_face_uv(key, chunk_uv).ok()?;
+                let cube_point = cube_point_for_face(key.face, face_uv_to_signed_coords(face_uv));
+                let unit_dir = self.config.cube_projection.project_cube_point(cube_point);
+                let height = f64::from(render_tile.height_at(x + border, y + border));
+                let displaced_point = unit_dir * (self.config.planet_radius + height);
+                let local_point = dvec3_to_vector3(displaced_point - chunk_origin_planet);
+                min.x = min.x.min(local_point.x);
+                min.y = min.y.min(local_point.y);
+                min.z = min.z.min(local_point.z);
+                max.x = max.x.max(local_point.x);
+                max.y = max.y.max(local_point.y);
+                max.z = max.z.max(local_point.z);
+            }
+        }
+
+        let padding = geometric_error.max(0.5);
+        min -= Vector3::new(padding, padding, padding);
+        max += Vector3::new(padding, padding, padding);
+        Some(Aabb::new(min, max - min))
+    }
+
     fn take_or_create_gpu_render_instance(&mut self, key: ChunkKey) -> Rid {
         if let Some(rid) = self
             .rid_state
@@ -1903,7 +1954,7 @@ impl PlanetRuntime {
                     render_instance_rid,
                     self.render_transform_for_chunk(chunk_origin_planet),
                 );
-                if let Some(bounds) = self
+                if let Some(meta) = self
                     .meta
                     .get_chunk_meta(
                         *key,
@@ -1914,12 +1965,24 @@ impl PlanetRuntime {
                     )
                     .ok()
                     .flatten()
-                    .map(|meta| meta.bounds)
                 {
-                    rendering_server.instance_set_custom_aabb(
-                        render_instance_rid,
-                        self.chunk_custom_aabb(bounds),
-                    );
+                    let custom_aabb =
+                        if self.config.render_backend == RenderBackendKind::GpuDisplacedCanonical {
+                            self.resident_payloads
+                                .get(key)
+                                .and_then(|payload| {
+                                    self.gpu_chunk_custom_aabb(
+                                        *key,
+                                        payload.chunk_origin_planet,
+                                        &payload.render_tile,
+                                        meta.metrics.geometric_error,
+                                    )
+                                })
+                                .unwrap_or_else(|| self.chunk_custom_aabb(meta.bounds))
+                        } else {
+                            self.chunk_custom_aabb(meta.bounds)
+                        };
+                    rendering_server.instance_set_custom_aabb(render_instance_rid, custom_aabb);
                 }
                 frame_state.phase10_render_transform_rebinds += 1;
             }
