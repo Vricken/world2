@@ -205,6 +205,10 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Date: 2026-04-04
 - [x] Result summary: after a live regression on the 100 km sample scene, the startup camera bootstrap was tightened so `PlanetRoot` no longer mutates camera clip distance in `ready()`, and the runtime far clip heuristic now grows only to cover the initial spawn shell and opposite hemisphere instead of scaling by a `10x` whole-planet multiplier that caused renderer instability.
 - [x] Profiles and scenarios tested: `cargo test`; `./scripts/build_rust.sh`; scripted non-headless startup log check on `res://scenes/main.tscn`.
+- [x] Date: 2026-04-04
+- [x] Result summary: a scripted Retina/window-mode probe now exists in `scenes/profiling/perf_probe.tscn` and `scripts/profile_window_modes.sh`, and isolated runs on the default scene showed the fullscreen regression is dominated by higher LOD demand and commit backlog rather than the atmosphere pass. On the repository's macOS Retina display, the probe measured `small_window` at `1728 x 1116` / `120.0235 FPS`, `fullscreen_native` at `3456 x 2168` / `116.4759 FPS` with `avg_desired_render=327.9771` and `avg_deferred_commits=83.4478`, `fullscreen_fixed_lod` at the same fullscreen pixel size but with `lod_viewport_height_override_px=1116` / `119.9981 FPS` with `avg_desired_render=110.3889` and `avg_deferred_commits=1.6569`, `fullscreen_native_no_atmosphere` at `116.7438 FPS`, and `fullscreen_fixed_lod_no_atmosphere` at `120.0614 FPS`. Because these runs were near a `120 Hz` cap, the stronger signal was the `~3x` fullscreen jump in desired render chunks and the `~50x` jump in deferred commit backlog, not the raw FPS delta alone.
+- [x] Profiles and scenarios tested: `./scripts/build_rust.sh`; `./scripts/profile_window_modes.sh` on the default `res://scenes/main.tscn` content through the non-headless macOS Godot binary.
+- [x] Deviations from the earlier phase note: the new `world2/debug/lod_viewport_height_override` Project Setting is intentionally debug-only and exists to hold projected-error LOD selection constant during profiling; it is not part of the shipped gameplay tuning surface.
 
 ## References
 

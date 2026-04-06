@@ -37,7 +37,7 @@ Phase 15 strategy-layer refinement for a Godot + Rust (godot-rust/gdext) planet 
 - Phase 15 strategy seams in `rust/src/runtime/strategy.rs`, `rust/src/runtime/data.rs`, `rust/src/runtime/pipeline/selection.rs`, `rust/src/runtime/pipeline/commit.rs`, `rust/src/runtime/workers/payloads.rs`, `rust/src/runtime/assets.rs`, `rust/src/runtime/tests.rs`, and `rust/src/lib.rs`, including config-backed projection/visibility/backend/staging policies, default strategy summaries in runtime logs, and regression coverage that keeps the shipped strategy stack behaviorally aligned with phases 01-14.
 - Fly debug controller in `scripts/player/fly_controller.gd` and `scenes/main.tscn`, with WASD + Space/Shift flight, mouse look, Up/Down speed scaling, runtime-derived spawn distance outside the configured atmosphere shell, and a runtime-derived camera far clip that scales with planet size.
 - Large-planet verification scene at `scenes/main_300km.tscn`, inheriting the main scene with `planet_radius = 300000.0` for headless boot validation.
-- Launch and build scripts in `scripts/`.
+- Launch and build scripts in `scripts/`, including `scripts/profile_window_modes.sh` plus `scenes/profiling/perf_probe.tscn` and `scripts/profiling/perf_probe.gd` for repeatable small-window vs fullscreen performance probes.
 
 ## Prerequisites
 
@@ -67,6 +67,23 @@ Use a custom binary:
 ```bash
 GODOT_BIN=/absolute/path/to/godot ./scripts/run_godot.sh
 ```
+
+## Window Mode Profiling
+
+Run the scripted small-window/fullscreen probe:
+
+```bash
+./scripts/profile_window_modes.sh
+```
+
+This launches `res://scenes/profiling/perf_probe.tscn` through the normal project runtime, captures `PERF_RESULT` lines for:
+
+- small window baseline
+- fullscreen at native LOD selection
+- fullscreen with LOD locked to the small-window viewport height
+- fullscreen without the atmosphere pass
+
+The probe also uses the debug-only Project Setting `world2/debug/lod_viewport_height_override` to hold the selector's projected-error viewport height constant while the window size changes, which makes it easier to separate pixel/fill cost from extra fullscreen-driven LOD demand.
 
 ## Controls
 
