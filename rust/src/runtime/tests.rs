@@ -11,6 +11,7 @@ fn test_runtime() -> PlanetRuntime {
             metadata_precompute_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
             dense_metadata_prebuild_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
             enable_godot_staging: false,
+            render_backend: RenderBackendKind::ServerPool,
             ..RuntimeConfig::default()
         },
         Rid::Invalid,
@@ -603,7 +604,16 @@ fn build_order_handoff_summary_matches_documented_phase_continuity() {
 
 #[test]
 fn phase15_default_strategy_summary_matches_documented_stack() {
-    let runtime = test_runtime();
+    let runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            metadata_precompute_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+            dense_metadata_prebuild_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
     let config = &runtime.config;
     let summary = runtime.strategy_summary();
 
@@ -617,7 +627,7 @@ fn phase15_default_strategy_summary_matches_documented_stack() {
     );
     assert_eq!(
         ChunkRenderBackend::label(&config.render_backend),
-        "server_pool_render_backend"
+        "gpu_displaced_canonical_render_backend"
     );
     assert_eq!(
         PackedStagingPolicy::label(&config.staging_policy),
@@ -625,8 +635,18 @@ fn phase15_default_strategy_summary_matches_documented_stack() {
     );
     assert!(summary.contains("projection=spherified_cube"));
     assert!(summary.contains("visibility=horizon_frustum_lod"));
-    assert!(summary.contains("render_backend=server_pool_render_backend"));
+    assert!(summary.contains("render_backend=gpu_displaced_canonical_render_backend"));
     assert!(summary.contains("staging=godot_owned_packed_byte_array"));
+}
+
+#[test]
+fn phase5_default_runtime_uses_gpu_backend() {
+    let runtime = PlanetRuntime::new(RuntimeConfig::default(), Rid::Invalid, Rid::Invalid);
+
+    assert_eq!(
+        runtime.config.render_backend,
+        RenderBackendKind::GpuDisplacedCanonical
+    );
 }
 
 #[test]
@@ -913,13 +933,20 @@ fn threaded_payload_handoff_preserves_request_sequence() {
         ChunkKey::new(Face::Py, 2, 1, 1),
     ];
     let desired_render = keys.iter().copied().collect::<HashSet<_>>();
+    let desired_physics = HashSet::new();
     let requests = keys
         .iter()
         .copied()
         .enumerate()
         .map(|(sequence, key)| {
             runtime
-                .prepare_render_payload_request(sequence, sequence as u64 + 1, key, &desired_render)
+                .prepare_render_payload_request(
+                    sequence,
+                    sequence as u64 + 1,
+                    key,
+                    &desired_render,
+                    &desired_physics,
+                )
                 .unwrap()
                 .unwrap()
         })
@@ -952,8 +979,9 @@ fn stale_async_payload_results_are_dropped_on_install() {
     );
     let key = ChunkKey::new(Face::Pz, 2, 1, 1);
     let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let desired_physics = HashSet::new();
     let request = runtime
-        .prepare_render_payload_request(0, 1, key, &desired_render)
+        .prepare_render_payload_request(0, 1, key, &desired_render, &desired_physics)
         .unwrap()
         .unwrap();
     let prepared = runtime.threaded_payload_generator.generate(vec![request]);
@@ -965,6 +993,7 @@ fn stale_async_payload_results_are_dropped_on_install() {
         PendingPayloadRequest {
             epoch: 2,
             surface_class: prepared.surface_class.clone(),
+            requirements: prepared.requirements,
         },
     );
 
@@ -1602,6 +1631,7 @@ fn threaded_payload_generation_reuses_worker_scratch_on_follow_up_batch() {
         ChunkKey::new(Face::Px, 2, 0, 1),
     ];
     let desired_render = keys.iter().copied().collect::<HashSet<_>>();
+    let desired_physics = HashSet::new();
 
     let first_requests = keys
         .iter()
@@ -1609,7 +1639,13 @@ fn threaded_payload_generation_reuses_worker_scratch_on_follow_up_batch() {
         .enumerate()
         .map(|(sequence, key)| {
             runtime
-                .prepare_render_payload_request(sequence, sequence as u64 + 1, key, &desired_render)
+                .prepare_render_payload_request(
+                    sequence,
+                    sequence as u64 + 1,
+                    key,
+                    &desired_render,
+                    &desired_physics,
+                )
                 .unwrap()
                 .unwrap()
         })
@@ -1627,6 +1663,7 @@ fn threaded_payload_generation_reuses_worker_scratch_on_follow_up_batch() {
                     sequence as u64 + 101,
                     key,
                     &desired_render,
+                    &desired_physics,
                 )
                 .unwrap()
                 .unwrap()
@@ -2528,6 +2565,7 @@ fn phase8_warm_pooled_commit_recycles_previous_render_entry() {
             metadata_precompute_max_lod: 0,
             enable_godot_staging: false,
             render_pool_watermark_per_class: 4,
+            render_backend: RenderBackendKind::ServerPool,
             ..RuntimeConfig::default()
         },
         Rid::Invalid,
@@ -2678,7 +2716,7 @@ fn phase4_gpu_backend_reuses_canonical_meshes_for_matching_surface_class() {
     assert!(runtime.commit_render_payload(key_b, &mut frame_state));
     assert_eq!(runtime.canonical_render_mesh_count(), 1);
     assert_eq!(runtime.active_gpu_render_count(), 2);
-    assert_eq!(frame_state.phase4_canonical_meshes, 1);
+    assert_eq!(frame_state.canonical_render_meshes, 1);
 }
 
 #[test]
@@ -2694,7 +2732,79 @@ fn phase4_gpu_backend_does_not_require_cpu_render_mesh_bytes_for_activation() {
     let mut frame_state = SelectionFrameState::default();
     assert!(runtime.commit_render_payload(key, &mut frame_state));
     assert!(runtime.ensure_rid_state(key).render_resident);
-    assert_eq!(frame_state.phase4_gpu_material_binds, 1);
+    assert_eq!(frame_state.gpu_material_binds, 1);
+}
+
+#[test]
+fn phase5_gpu_render_payloads_skip_cpu_mesh_outside_physics_set() {
+    let mut runtime = test_gpu_runtime();
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let desired_physics = HashSet::new();
+    let request = runtime
+        .prepare_render_payload_request(0, 1, key, &desired_render, &desired_physics)
+        .unwrap()
+        .unwrap();
+    let prepared = runtime.threaded_payload_generator.generate(vec![request]);
+    let prepared = prepared.results.into_iter().next().unwrap();
+    let mut frame_state = SelectionFrameState::default();
+
+    assert!(!prepared.requirements.cpu_render_data);
+    assert!(!prepared.requirements.collision_mesh);
+    assert!(prepared.packed_regions.is_none());
+    assert_eq!(prepared.mesh.vertex_count(), 0);
+    assert_eq!(prepared.mesh.index_count(), 0);
+
+    runtime.pending_payload_requests.insert(
+        key,
+        PendingPayloadRequest {
+            epoch: prepared.epoch,
+            surface_class: prepared.surface_class.clone(),
+            requirements: prepared.requirements,
+        },
+    );
+    runtime.accept_prepared_render_payload(prepared, &mut frame_state);
+    let payload = runtime.resident_payloads.get(&key).unwrap();
+    assert!(!payload.has_cpu_render_data());
+    assert!(!payload.has_collision_mesh_data());
+    assert_eq!(frame_state.phase7_meshed_chunks, 0);
+    assert_eq!(frame_state.phase7_packed_chunks, 0);
+}
+
+#[test]
+fn phase5_gpu_payloads_keep_collision_mesh_for_physics_set() {
+    let mut runtime = test_gpu_runtime();
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let desired_physics = [key].into_iter().collect::<HashSet<_>>();
+    let request = runtime
+        .prepare_render_payload_request(0, 1, key, &desired_render, &desired_physics)
+        .unwrap()
+        .unwrap();
+    let prepared = runtime.threaded_payload_generator.generate(vec![request]);
+    let prepared = prepared.results.into_iter().next().unwrap();
+    let mut frame_state = SelectionFrameState::default();
+
+    assert!(!prepared.requirements.cpu_render_data);
+    assert!(prepared.requirements.collision_mesh);
+    assert!(prepared.packed_regions.is_none());
+    assert!(prepared.mesh.vertex_count() > 0);
+    assert!(prepared.mesh.index_count() > 0);
+
+    runtime.pending_payload_requests.insert(
+        key,
+        PendingPayloadRequest {
+            epoch: prepared.epoch,
+            surface_class: prepared.surface_class.clone(),
+            requirements: prepared.requirements,
+        },
+    );
+    runtime.accept_prepared_render_payload(prepared, &mut frame_state);
+    let payload = runtime.resident_payloads.get(&key).unwrap();
+    assert!(!payload.has_cpu_render_data());
+    assert!(payload.has_collision_mesh_data());
+    assert_eq!(frame_state.phase7_meshed_chunks, 1);
+    assert_eq!(frame_state.phase7_packed_chunks, 0);
 }
 
 #[test]
@@ -2702,11 +2812,23 @@ fn phase4_gpu_custom_aabb_contains_visible_chunk_vertices() {
     let mut runtime = test_gpu_runtime();
     let key = ChunkKey::new(Face::Pz, 2, 1, 1);
     let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let desired_physics = [key].into_iter().collect::<HashSet<_>>();
     let mut frame_state = SelectionFrameState::default();
-
-    runtime
-        .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+    let request = runtime
+        .prepare_render_payload_request(0, 1, key, &desired_render, &desired_physics)
+        .unwrap()
         .unwrap();
+    let prepared = runtime.threaded_payload_generator.generate(vec![request]);
+    let prepared = prepared.results.into_iter().next().unwrap();
+    runtime.pending_payload_requests.insert(
+        key,
+        PendingPayloadRequest {
+            epoch: prepared.epoch,
+            surface_class: prepared.surface_class.clone(),
+            requirements: prepared.requirements,
+        },
+    );
+    runtime.accept_prepared_render_payload(prepared, &mut frame_state);
 
     let payload = runtime.resident_payloads.get(&key).unwrap().clone();
     let meta = runtime.ensure_chunk_meta(key).unwrap();

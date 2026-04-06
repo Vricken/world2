@@ -396,6 +396,27 @@ impl PlanetRuntime {
         }
     }
 
+    pub fn collision_residency_snapshot(&self) -> CollisionResidencySnapshot {
+        let mut snapshot = CollisionResidencySnapshot::default();
+
+        for payload in self.resident_payloads.values() {
+            if !payload.has_collision_mesh_data()
+                && payload.collision.collider_vertices.is_none()
+                && payload.collision.collider_indices.is_none()
+                && payload.collision.collider_faces.is_none()
+            {
+                continue;
+            }
+
+            snapshot.entries += 1;
+            snapshot.bytes = snapshot
+                .bytes
+                .saturating_add(payload.collision_resident_bytes());
+        }
+
+        snapshot
+    }
+
     pub fn rid_state_count(&self) -> usize {
         self.rid_state.len()
     }

@@ -326,6 +326,7 @@ pub struct PlanetRuntime {
 struct PendingPayloadRequest {
     epoch: u64,
     surface_class: SurfaceClassKey,
+    requirements: PayloadBuildRequirements,
 }
 
 impl PlanetRuntime {

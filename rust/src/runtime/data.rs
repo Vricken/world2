@@ -827,6 +827,30 @@ pub struct ChunkPayload {
     pub render_lifecycle: RenderLifecycleCommand,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PayloadBuildRequirements {
+    pub cpu_render_data: bool,
+    pub collision_mesh: bool,
+}
+
+impl PayloadBuildRequirements {
+    pub const fn new(cpu_render_data: bool, collision_mesh: bool) -> Self {
+        Self {
+            cpu_render_data,
+            collision_mesh,
+        }
+    }
+
+    pub const fn requires_cpu_mesh(self) -> bool {
+        self.cpu_render_data || self.collision_mesh
+    }
+
+    pub const fn satisfies(self, required: Self) -> bool {
+        (!required.cpu_render_data || self.cpu_render_data)
+            && (!required.collision_mesh || self.collision_mesh)
+    }
+}
+
 impl Default for ChunkPayload {
     fn default() -> Self {
         let surface_class = SurfaceClassKey::canonical_chunk(
@@ -878,6 +902,44 @@ impl ChunkPayload {
 
     pub fn render_tile_bytes(&self) -> usize {
         self.render_tile.byte_len()
+    }
+
+    pub fn has_cpu_render_data(&self) -> bool {
+        self.packed_regions.is_some()
+    }
+
+    pub fn has_collision_mesh_data(&self) -> bool {
+        !self.mesh.positions.is_empty() && !self.mesh.indices.is_empty()
+    }
+
+    pub fn build_requirements(&self) -> PayloadBuildRequirements {
+        PayloadBuildRequirements::new(self.has_cpu_render_data(), self.has_collision_mesh_data())
+    }
+
+    pub fn collision_resident_bytes(&self) -> usize {
+        let mut bytes = 0usize;
+        if let Some(vertices) = self.collision.collider_vertices.as_ref() {
+            bytes = bytes.saturating_add(vertices.len() * std::mem::size_of::<[f32; 3]>());
+        } else if self.has_collision_mesh_data() {
+            bytes = bytes.saturating_add(self.mesh.positions.len() * std::mem::size_of::<[f32; 3]>());
+        }
+
+        if let Some(indices) = self.collision.collider_indices.as_ref() {
+            bytes = bytes.saturating_add(indices.len() * std::mem::size_of::<i32>());
+        } else if self.has_collision_mesh_data() {
+            bytes = bytes.saturating_add(self.mesh.indices.len() * std::mem::size_of::<i32>());
+        }
+
+        if let Some(faces) = self.collision.collider_faces.as_ref() {
+            bytes = bytes.saturating_add(faces.len() * std::mem::size_of::<[f32; 3]>());
+        }
+
+        bytes
+    }
+
+    pub fn clear_collision_data(&mut self) {
+        self.mesh = CpuMeshBuffers::default();
+        self.collision = ChunkCollisionPayload::default();
     }
 }
 
@@ -993,6 +1055,12 @@ pub struct RenderTilePoolSnapshot {
     pub free_slots: usize,
     pub resident_bytes: usize,
     pub eviction_ready_slots: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CollisionResidencySnapshot {
+    pub entries: usize,
+    pub bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1197,7 +1265,7 @@ impl Default for RuntimeConfig {
             visibility_strategy: VisibilityStrategyKind::HorizonFrustumLod,
             enable_frustum_culling: true,
             keep_coarse_lod_chunks_rendered: false,
-            render_backend: RenderBackendKind::ServerPool,
+            render_backend: RenderBackendKind::GpuDisplacedCanonical,
             staging_policy: PackedStagingPolicyKind::GodotOwnedReuse,
             enable_godot_staging: true,
             use_large_world_coordinates: false,

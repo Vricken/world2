@@ -237,6 +237,7 @@ impl PlanetRuntime {
             .unwrap_or(0);
         self.update_selected_render_starvation(frame_state);
         self.sync_asset_groups(frame_state)?;
+        self.trim_non_physics_collision_payloads(desired_physics);
         frame_state.render_residency_evictions += self.evict_render_residency_entries_to_limit(
             self.render_residency_soft_limit(desired_render.len()),
         );
@@ -249,8 +250,11 @@ impl PlanetRuntime {
         frame_state.render_tile_pool_active_slots = tile_pool.active_slots;
         frame_state.render_tile_pool_free_slots = tile_pool.free_slots;
         frame_state.render_tile_eviction_ready_slots = tile_pool.eviction_ready_slots;
-        frame_state.phase4_active_gpu_render_chunks = self.active_gpu_render_count();
-        frame_state.phase4_canonical_meshes = self.canonical_render_mesh_count();
+        let collision_snapshot = self.collision_residency_snapshot();
+        frame_state.collision_residency_entries = collision_snapshot.entries;
+        frame_state.collision_residency_bytes = collision_snapshot.bytes;
+        frame_state.active_gpu_render_chunks = self.active_gpu_render_count();
+        frame_state.canonical_render_meshes = self.canonical_render_mesh_count();
         let asset_debug = self.asset_debug_snapshot();
         frame_state.phase12_active_groups = asset_debug.active_groups;
         frame_state.phase12_active_instances = asset_debug.active_instances;
@@ -378,8 +382,11 @@ impl PlanetRuntime {
             .get(&key)
             .map(|payload| {
                 payload.surface_class == *required_surface_class
-                    && payload.packed_regions.is_some()
                     && payload.render_tile.validate_layout().is_ok()
+                    && match self.config.render_backend {
+                        RenderBackendKind::ServerPool => payload.has_cpu_render_data(),
+                        RenderBackendKind::GpuDisplacedCanonical => true,
+                    }
             })
             .unwrap_or(false)
     }
@@ -483,7 +490,18 @@ impl PlanetRuntime {
                 .map(|entry| self.render_entry_needs_refresh(*key, entry))
                 .unwrap_or(true)
         }));
-        self.request_render_payloads_for_selection(&refresh_keys, desired_render, frame_state)?;
+        let mut physics_refresh_keys = desired_physics.iter().copied().collect::<Vec<_>>();
+        physics_refresh_keys.sort_unstable();
+        physics_refresh_keys.dedup();
+        refresh_keys.extend(physics_refresh_keys);
+        refresh_keys.sort_unstable();
+        refresh_keys.dedup();
+        self.request_render_payloads_for_selection(
+            &refresh_keys,
+            desired_render,
+            desired_physics,
+            frame_state,
+        )?;
         self.drain_ready_render_payloads(frame_state);
 
         for key in render_updates {
@@ -541,7 +559,7 @@ impl PlanetRuntime {
             .collect::<Vec<_>>();
         physics_activations.sort_unstable();
         for key in physics_activations {
-            if !self.payload_matches_selection(key, desired_render)? {
+            if !self.payload_matches_selection(key, desired_render, desired_physics)? {
                 continue;
             }
             ops.push(CommitOp {
@@ -970,10 +988,10 @@ impl PlanetRuntime {
         rid_state.pooled_surface_class = Some(surface_class);
         rid_state.gd_staging = None;
         self.gpu_active_materials.insert(key, material_entry);
-        frame_state.phase4_gpu_tile_upload_bytes += render_tile.byte_len();
-        frame_state.phase4_gpu_material_binds += 1;
-        frame_state.phase4_active_gpu_render_chunks = self.gpu_active_materials.len();
-        frame_state.phase4_canonical_meshes = self.canonical_render_meshes.len();
+        frame_state.gpu_tile_upload_bytes += render_tile.byte_len();
+        frame_state.gpu_material_binds += 1;
+        frame_state.active_gpu_render_chunks = self.gpu_active_materials.len();
+        frame_state.canonical_render_meshes = self.canonical_render_meshes.len();
         true
     }
 
@@ -1606,6 +1624,22 @@ impl PlanetRuntime {
     pub(crate) fn reclaim_payload_resources(&mut self, mut payload: ChunkPayload) {
         if let Some(entry) = payload.pooled_render_entry.take() {
             self.recycle_render_entry(entry);
+        }
+    }
+
+    pub(crate) fn trim_non_physics_collision_payloads(
+        &mut self,
+        desired_physics: &HashSet<ChunkKey>,
+    ) {
+        if self.config.render_backend != RenderBackendKind::GpuDisplacedCanonical {
+            return;
+        }
+
+        for (key, payload) in &mut self.resident_payloads {
+            if desired_physics.contains(key) || self.active_physics.contains(key) {
+                continue;
+            }
+            payload.clear_collision_data();
         }
     }
 

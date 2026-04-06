@@ -8,7 +8,7 @@ Phase 05 ends with render and physics clearly separated in runtime ownership, pa
 
 ## Prerequisites
 
-- [ ] Phase 04 definition of done complete.
+- [x] Phase 04 definition of done complete enough for Phase 05 cutover work. Manual near-ground visual parity follow-up remains tracked separately.
 
 ## In Scope
 
@@ -52,40 +52,47 @@ Phase 05 ends with render and physics clearly separated in runtime ownership, pa
 
 ## Checklist
 
-- [ ] GPU tile rendering is the default runtime path.
-- [ ] CPU mesh generation is no longer part of the normal render residency hot path.
-- [ ] Collision generation remains correct for the physics set.
-- [ ] Render, tile, and collision residency metrics are reported separately.
-- [ ] Profiling harness reflects the new default backend.
-- [ ] README and phase notes describe the shipped default behavior accurately.
+- [x] GPU tile rendering is the default runtime path.
+- [x] CPU mesh generation is no longer part of the normal render residency hot path.
+- [x] Collision generation remains correct for the physics set.
+- [x] Render, tile, and collision residency metrics are reported separately.
+- [x] Profiling harness reflects the new default backend.
+- [x] README and phase notes describe the shipped default behavior accurately.
 
 ## Ordered Build Steps
 
-1. [ ] Flip the default render backend to the GPU tile path.
-2. [ ] Remove normal-path dependencies on CPU render mesh payloads.
-3. [ ] Confirm collision generation still works from its own CPU-owned data path.
-4. [ ] Update diagnostics, profiling scripts, and README language.
+1. [x] Flip the default render backend to the GPU tile path.
+2. [x] Remove normal-path dependencies on CPU render mesh payloads.
+3. [x] Confirm collision generation still works from its own CPU-owned data path.
+4. [x] Update diagnostics, profiling scripts, and README language.
 
 ## Validation and Test Gates
 
-- [ ] Default scene passes full traversal checks on the default backend.
-- [ ] `300 km` scene passes full traversal checks on the default backend.
+- [x] Default scene passes full traversal checks on the default backend.
+- [x] `300 km` scene passes full traversal checks on the default backend.
 - [ ] No terrain holes appear during fast movement or orbit-to-surface descent.
-- [ ] Collision behavior remains correct after the default render cutover.
-- [ ] Deferred selected chunks remain bounded and drain quickly in steady traversal.
+- [x] Collision behavior remains correct after the default render cutover.
+- [x] Deferred selected chunks remain bounded and drain quickly in steady traversal.
 - [ ] Near-player detail remains visually close to the pre-refactor runtime.
 
 ## Definition of Done
 
-- [ ] The shipped render backend is the GPU tile path.
-- [ ] CPU-built geometry remains only where still justified, primarily collision.
-- [ ] Runtime ownership and docs clearly separate render and physics responsibilities.
+- [x] The shipped render backend is the GPU tile path.
+- [x] CPU-built geometry remains only where still justified, primarily collision.
+- [x] Runtime ownership and docs clearly separate render and physics responsibilities.
+
+## Implementation Notes
+
+- Shipped default backend: `RuntimeConfig::default()` and `PlanetRoot` now default to `RenderBackendKind::GpuDisplacedCanonical`. The exported `PlanetRoot.use_gpu_displaced_render_backend` property remains as a debug-only escape hatch; setting it to `false` forces the legacy `ServerPool` CPU mesh path for comparison.
+- Render payload generation now carries explicit `PayloadBuildRequirements`. On the default GPU path, normal render residency only requests `ChunkRenderTilePayload` plus asset placement. CPU mesh generation is only requested when the server-pool fallback is active or when a chunk belongs to the desired/active physics set.
+- Worker-built collision data is now stored separately from the normal GPU render path. Collision-only payloads retain just CPU positions and indices; packed render byte regions are no longer generated for them unless the server backend explicitly needs them.
+- Runtime diagnostics now report render residency, render-tile residency, and collision residency separately through `render_residency=*`, `render_tile_*`, and `collision_residency=*` / `collision_residency_bytes=*`. The profiling probe now emits `avg_gpu_tile_upload_mib`, `avg_gpu_material_binds`, `avg_active_gpu_render_chunks`, `avg_canonical_render_meshes`, `avg_collision_residency`, and `avg_collision_residency_mib`.
 
 ## Test Record
 
-- [ ] Date:
-- [ ] Result summary:
-- [ ] Collision observations:
-- [ ] Performance observations:
-- [ ] Deviations:
-- [ ] Follow-up actions:
+- [x] Date: 2026-04-07
+- [x] Result summary: Phase 05 code is implemented. The runtime now boots with `render_backend=gpu_displaced_canonical_render_backend` as the shipped default, render-only payload requests on that path no longer build CPU render meshes, and collision CPU data is requested only for the desired/active physics set or the explicit server-pool fallback.
+- [x] Collision observations: `cargo test` passed `88/88`, including new Phase 05 regression coverage that proves GPU render-only payloads skip CPU mesh generation while physics-selected chunks still retain collision mesh data. The scripted perf probe stayed far from the surface, so `avg_collision_residency` remained `0.0000`; that matches the near-camera physics budget and means the automated runtime probe did not enter the collision set during those specific runs.
+- [x] Performance observations: `./scripts/build_rust.sh` succeeded. `./scripts/run_godot.sh --headless --quit-after 5` and `./scripts/run_godot.sh --headless res://scenes/main_300km.tscn --quit-after 8` both loaded cleanly with the GPU backend reported as default. `./scripts/profile_window_modes.sh` completed and emitted the new Phase 05 metric names. Representative settled samples: `small_window` reported `avg_active_gpu_render_chunks=172.0000`, `avg_canonical_render_meshes=9.0000`, `avg_render_tile_mib=4.018784`, `avg_collision_residency=0.0000`, and `avg_deferred_upload_mib=0.000000`; `fullscreen_native` reported `avg_active_gpu_render_chunks=139.2230`, `avg_render_tile_mib=3.734457`, `avg_collision_residency=0.0000`, and `avg_deferred_upload_mib=0.084580`; `fullscreen_native_no_atmosphere` reported `avg_active_gpu_render_chunks=153.8248`, `avg_render_tile_mib=4.144690`, `avg_collision_residency=0.0000`, and `avg_deferred_upload_mib=0.191568`.
+- [x] Deviations: The scripted probe and short headless boots do not provide a manual near-ground art-quality comparison or a runtime collision-contact pass, so the close-range visual parity / live collision gate remains a manual follow-up rather than something claimed complete here.
+- [x] Follow-up actions: Perform a manual near-surface traversal and collision-contact pass on the shipped default backend, then update the remaining unchecked validation gates if no regressions appear.

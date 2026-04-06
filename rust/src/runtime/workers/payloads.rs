@@ -6,6 +6,7 @@ pub(crate) struct RenderPayloadRequest {
     pub epoch: u64,
     pub key: ChunkKey,
     pub surface_class: SurfaceClassKey,
+    pub requirements: PayloadBuildRequirements,
     pub chunk_origin_planet: DVec3,
     pub config: RuntimeConfig,
 }
@@ -31,7 +32,8 @@ pub(crate) struct PreparedRenderPayload {
     pub render_tile: ChunkRenderTilePayload,
     pub mesh: CpuMeshBuffers,
     pub assets: Vec<AssetInstance>,
-    pub packed_regions: PackedMeshRegions,
+    pub packed_regions: Option<PackedMeshRegions>,
+    pub requirements: PayloadBuildRequirements,
     pub scratch_metrics: WorkerScratchJobMetrics,
 }
 
@@ -390,33 +392,57 @@ fn build_render_payload_with_scratch(
         request.config.height_amplitude,
     );
 
-    let vertex_count = request.surface_class.vertex_count as usize;
-    let index_count = request.surface_class.index_count as usize;
-    let (mesh_reuse, mesh_growth) = scratch.prepare_mesh(vertex_count, index_count);
-    growth_events += mesh_growth;
     let render_tile = ChunkRenderTilePayload::from_samples(samples_per_edge, &scratch.samples);
-    derive_cpu_mesh_buffers_into(
-        &request.config,
-        &scratch.samples,
-        samples_per_edge,
-        request.surface_class.stitch_mask,
-        request.chunk_origin_planet,
-        &mut scratch.mesh,
-    );
+    let mut mesh_reuse = false;
+    let mut pack_reuse = false;
+    let mut mesh = CpuMeshBuffers::default();
+    let mut packed_regions = None;
 
-    let (pack_reuse, pack_growth) = scratch.prepare_packed_regions(
-        request.surface_class.vertex_bytes,
-        request.surface_class.attribute_bytes,
-        request.surface_class.index_bytes,
-    );
-    growth_events += pack_growth;
-    pack_mesh_regions_into(
-        &scratch.mesh,
-        &request.surface_class,
-        &mut scratch.vertex_region,
-        &mut scratch.attribute_region,
-        &mut scratch.index_region,
-    );
+    if request.requirements.requires_cpu_mesh() {
+        let vertex_count = request.surface_class.vertex_count as usize;
+        let index_count = request.surface_class.index_count as usize;
+        let (prepared_mesh_reuse, mesh_growth) = scratch.prepare_mesh(vertex_count, index_count);
+        mesh_reuse = prepared_mesh_reuse;
+        growth_events += mesh_growth;
+        derive_cpu_mesh_buffers_into(
+            &request.config,
+            &scratch.samples,
+            samples_per_edge,
+            request.surface_class.stitch_mask,
+            request.chunk_origin_planet,
+            &mut scratch.mesh,
+        );
+
+        if request.requirements.cpu_render_data {
+            let (prepared_pack_reuse, pack_growth) = scratch.prepare_packed_regions(
+                request.surface_class.vertex_bytes,
+                request.surface_class.attribute_bytes,
+                request.surface_class.index_bytes,
+            );
+            pack_reuse = prepared_pack_reuse;
+            growth_events += pack_growth;
+            pack_mesh_regions_into(
+                &scratch.mesh,
+                &request.surface_class,
+                &mut scratch.vertex_region,
+                &mut scratch.attribute_region,
+                &mut scratch.index_region,
+            );
+            packed_regions = Some(PackedMeshRegions {
+                vertex_region: scratch.vertex_region.clone(),
+                attribute_region: scratch.attribute_region.clone(),
+                index_region: scratch.index_region.clone(),
+                vertex_stride: request.surface_class.vertex_stride,
+                attribute_stride: request.surface_class.attribute_stride,
+                index_stride: request.surface_class.index_stride,
+            });
+            mesh = scratch.mesh.clone();
+        } else if request.requirements.collision_mesh {
+            mesh.positions = scratch.mesh.positions.clone();
+            mesh.indices = scratch.mesh.indices.clone();
+        }
+    }
+
     let placement = build_chunk_asset_placement(&request.config, request.key);
 
     PreparedRenderPayload {
@@ -429,16 +455,10 @@ fn build_render_payload_with_scratch(
         asset_rejected_count: placement.rejected_count,
         chunk_origin_planet: request.chunk_origin_planet,
         render_tile,
-        mesh: scratch.mesh.clone(),
+        mesh,
         assets: placement.assets,
-        packed_regions: PackedMeshRegions {
-            vertex_region: scratch.vertex_region.clone(),
-            attribute_region: scratch.attribute_region.clone(),
-            index_region: scratch.index_region.clone(),
-            vertex_stride: request.surface_class.vertex_stride,
-            attribute_stride: request.surface_class.attribute_stride,
-            index_stride: request.surface_class.index_stride,
-        },
+        packed_regions,
+        requirements: request.requirements,
         scratch_metrics: WorkerScratchJobMetrics {
             sample_reuse,
             mesh_reuse,

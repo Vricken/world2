@@ -9,10 +9,10 @@ pub struct SelectionFrameState {
     pub tick: u64,
     pub desired_render_count: usize,
     pub desired_physics_count: usize,
-    pub phase4_gpu_tile_upload_bytes: usize,
-    pub phase4_gpu_material_binds: usize,
-    pub phase4_active_gpu_render_chunks: usize,
-    pub phase4_canonical_meshes: usize,
+    pub gpu_tile_upload_bytes: usize,
+    pub gpu_material_binds: usize,
+    pub active_gpu_render_chunks: usize,
+    pub canonical_render_meshes: usize,
     pub render_residency_entries: usize,
     pub render_residency_evictions: usize,
     pub render_tile_bytes: usize,
@@ -20,6 +20,8 @@ pub struct SelectionFrameState {
     pub render_tile_pool_active_slots: usize,
     pub render_tile_pool_free_slots: usize,
     pub render_tile_eviction_ready_slots: usize,
+    pub collision_residency_entries: usize,
+    pub collision_residency_bytes: usize,
     pub selected_render_starved_chunks: usize,
     pub selected_render_starvation_failures: usize,
     pub max_selected_render_starvation_frames: u32,
@@ -1043,7 +1045,14 @@ impl PlanetRuntime {
         desired_render: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
     ) -> Result<usize, TopologyError> {
-        let Some(request) = self.prepare_render_payload_request(0, 0, key, desired_render)? else {
+        let desired_physics = HashSet::new();
+        let Some(request) = self.prepare_render_payload_request(
+            0,
+            0,
+            key,
+            desired_render,
+            &desired_physics,
+        )? else {
             return Ok(self.payload_upload_bytes(key));
         };
 
@@ -1071,10 +1080,29 @@ impl PlanetRuntime {
             render_tile: samples.to_render_tile_payload(),
             mesh,
             assets: placement.assets,
-            packed_regions,
+            packed_regions: Some(packed_regions),
+            requirements: request.requirements,
             scratch_metrics: super::super::workers::payloads::WorkerScratchJobMetrics::default(),
         };
         Ok(self.install_prepared_render_payload(prepared, frame_state))
+    }
+
+    fn payload_requirements_for_key(&self, desired_physics: &HashSet<ChunkKey>, key: ChunkKey) -> PayloadBuildRequirements {
+        PayloadBuildRequirements::new(
+            self.config.render_backend == RenderBackendKind::ServerPool,
+            desired_physics.contains(&key) || self.active_physics.contains(&key),
+        )
+    }
+
+    fn payload_satisfies_requirements(
+        &self,
+        payload: &ChunkPayload,
+        surface_class: &SurfaceClassKey,
+        requirements: PayloadBuildRequirements,
+    ) -> bool {
+        payload.surface_class == *surface_class
+            && payload.render_tile.validate_layout().is_ok()
+            && payload.build_requirements().satisfies(requirements)
     }
 
     pub(crate) fn prepare_render_payload_request(
@@ -1083,16 +1111,14 @@ impl PlanetRuntime {
         epoch: u64,
         key: ChunkKey,
         desired_render: &HashSet<ChunkKey>,
+        desired_physics: &HashSet<ChunkKey>,
     ) -> Result<Option<RenderPayloadRequest>, TopologyError> {
         let surface_class = self.required_surface_class_for_selection(key, desired_render)?;
+        let requirements = self.payload_requirements_for_key(desired_physics, key);
         let existing_matches = self
             .resident_payloads
             .get(&key)
-            .map(|payload| {
-                payload.surface_class == surface_class
-                    && payload.packed_regions.is_some()
-                    && payload.render_tile.validate_layout().is_ok()
-            })
+            .map(|payload| self.payload_satisfies_requirements(payload, &surface_class, requirements))
             .unwrap_or(false);
         if existing_matches {
             return Ok(None);
@@ -1103,6 +1129,7 @@ impl PlanetRuntime {
             epoch,
             key,
             surface_class,
+            requirements,
             chunk_origin_planet: self.ensure_chunk_meta(key)?.bounds.center_planet,
             config: self.config.clone(),
         }))
@@ -1112,6 +1139,7 @@ impl PlanetRuntime {
         &mut self,
         keys: &[ChunkKey],
         desired_render: &HashSet<ChunkKey>,
+        desired_physics: &HashSet<ChunkKey>,
         frame_state: &mut SelectionFrameState,
     ) -> Result<(), TopologyError> {
         let mut sorted_keys = keys.to_vec();
@@ -1124,14 +1152,11 @@ impl PlanetRuntime {
         let mut requests = Vec::new();
         for key in sorted_keys {
             let surface_class = self.required_surface_class_for_selection(key, desired_render)?;
+            let requirements = self.payload_requirements_for_key(desired_physics, key);
             let existing_matches = self
                 .resident_payloads
                 .get(&key)
-                .map(|payload| {
-                    payload.surface_class == surface_class
-                        && payload.packed_regions.is_some()
-                        && payload.render_tile.validate_layout().is_ok()
-                })
+                .map(|payload| self.payload_satisfies_requirements(payload, &surface_class, requirements))
                 .unwrap_or(false);
             if existing_matches {
                 self.pending_payload_requests.remove(&key);
@@ -1141,7 +1166,10 @@ impl PlanetRuntime {
             if self
                 .pending_payload_requests
                 .get(&key)
-                .map(|pending| pending.surface_class == surface_class)
+                .map(|pending| {
+                    pending.surface_class == surface_class
+                        && pending.requirements.satisfies(requirements)
+                })
                 .unwrap_or(false)
             {
                 continue;
@@ -1150,13 +1178,20 @@ impl PlanetRuntime {
             let epoch = self.next_payload_request_epoch;
             self.next_payload_request_epoch = self.next_payload_request_epoch.saturating_add(1);
             if let Some(request) =
-                self.prepare_render_payload_request(requests.len(), epoch, key, desired_render)?
+                self.prepare_render_payload_request(
+                    requests.len(),
+                    epoch,
+                    key,
+                    desired_render,
+                    desired_physics,
+                )?
             {
                 self.pending_payload_requests.insert(
                     key,
                     PendingPayloadRequest {
                         epoch,
                         surface_class: surface_class.clone(),
+                        requirements,
                     },
                 );
                 requests.push(request);
@@ -1196,7 +1231,10 @@ impl PlanetRuntime {
             frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
             return false;
         };
-        if pending.epoch != prepared.epoch || pending.surface_class != prepared.surface_class {
+        if pending.epoch != prepared.epoch
+            || pending.surface_class != prepared.surface_class
+            || pending.requirements != prepared.requirements
+        {
             frame_state.phase9_stale_results_dropped += 1;
             frame_state.phase9_inflight_jobs = self.pending_payload_requests.len();
             return false;
@@ -1219,16 +1257,16 @@ impl PlanetRuntime {
         &mut self,
         key: ChunkKey,
         desired_render: &HashSet<ChunkKey>,
+        desired_physics: &HashSet<ChunkKey>,
     ) -> Result<bool, TopologyError> {
         let required_surface_class =
             self.required_surface_class_for_selection(key, desired_render)?;
+        let requirements = self.payload_requirements_for_key(desired_physics, key);
         Ok(self
             .resident_payloads
             .get(&key)
             .map(|payload| {
-                payload.surface_class == required_surface_class
-                    && payload.packed_regions.is_some()
-                    && payload.render_tile.validate_layout().is_ok()
+                self.payload_satisfies_requirements(payload, &required_surface_class, requirements)
             })
             .unwrap_or(false))
     }
@@ -1278,12 +1316,17 @@ impl PlanetRuntime {
             mesh,
             assets,
             packed_regions,
+            requirements,
             ..
         } = prepared;
 
         frame_state.phase7_sampled_chunks += 1;
-        frame_state.phase7_meshed_chunks += 1;
-        frame_state.phase7_packed_chunks += 1;
+        if requirements.requires_cpu_mesh() {
+            frame_state.phase7_meshed_chunks += 1;
+        }
+        if packed_regions.is_some() {
+            frame_state.phase7_packed_chunks += 1;
+        }
         frame_state.phase12_asset_candidate_count += asset_candidate_count;
         frame_state.phase12_asset_rejected_count += asset_rejected_count;
         frame_state.phase12_asset_accepted_count += assets.len();
@@ -1329,15 +1372,25 @@ impl PlanetRuntime {
             }
         };
 
-        let upload_bytes = packed_regions.vertex_region.len()
-            + packed_regions.attribute_region.len()
-            + packed_regions.index_region.len();
+        let upload_bytes = packed_regions
+            .as_ref()
+            .map(|regions| {
+                regions.vertex_region.len()
+                    + regions.attribute_region.len()
+                    + regions.index_region.len()
+            })
+            .unwrap_or(0);
         let mut staging = None;
-        if self.config.enable_godot_staging {
+        if self.config.enable_godot_staging && packed_regions.is_some() {
             let mut staged =
-                self.stage_payload_bytes(key, &surface_class, &packed_regions, &warm_path);
+                self.stage_payload_bytes(key, &surface_class, packed_regions.as_ref(), &warm_path);
             staged
-                .copy_from_regions(&packed_regions, &surface_class)
+                .copy_from_regions(
+                    packed_regions
+                        .as_ref()
+                        .expect("staging requires packed regions"),
+                    &surface_class,
+                )
                 .expect("staging capacity must match the selected surface class");
             frame_state.phase7_staged_chunks += 1;
             staging = Some(staged);
@@ -1350,7 +1403,7 @@ impl PlanetRuntime {
             sample_count,
             chunk_origin_planet,
             mesh,
-            packed_regions: Some(packed_regions),
+            packed_regions,
             gd_staging: staging,
             pooled_render_entry: match warm_path {
                 RenderWarmPath::ReusePooledSurface(entry) => Some(entry),
@@ -1377,7 +1430,7 @@ impl PlanetRuntime {
         &mut self,
         key: ChunkKey,
         surface_class: &SurfaceClassKey,
-        _packed_regions: &PackedMeshRegions,
+        _packed_regions: Option<&PackedMeshRegions>,
         warm_path: &RenderWarmPath,
     ) -> GdPackedStaging {
         let policy = self.config.staging_policy;
