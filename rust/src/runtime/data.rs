@@ -578,6 +578,83 @@ impl ChunkSampleGrid {
         let index = (y * self.samples_per_edge + x) as usize;
         &self.samples[index]
     }
+
+    pub fn to_render_tile_payload(&self) -> ChunkRenderTilePayload {
+        ChunkRenderTilePayload::from_samples(self.samples_per_edge, &self.samples)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChunkRenderTilePayload {
+    pub samples_per_edge: u32,
+    pub height_tile: Vec<f32>,
+    pub material_tile: Option<Vec<[f32; 4]>>,
+    pub normal_tile: Option<Vec<[f32; 3]>>,
+}
+
+impl ChunkRenderTilePayload {
+    pub fn from_samples(samples_per_edge: u32, samples: &[ChunkSample]) -> Self {
+        let height_tile = samples
+            .iter()
+            .map(|sample| sample.height)
+            .collect::<Vec<_>>();
+        let material_tile = samples
+            .iter()
+            .map(|sample| [sample.biome0, sample.biome1, sample.slope_hint, 1.0])
+            .collect::<Vec<_>>();
+
+        Self {
+            samples_per_edge,
+            height_tile,
+            material_tile: Some(material_tile),
+            normal_tile: None,
+        }
+    }
+
+    pub fn sample_count(&self) -> usize {
+        (self.samples_per_edge * self.samples_per_edge) as usize
+    }
+
+    pub fn validate_layout(&self) -> Result<(), &'static str> {
+        let expected = self.sample_count();
+        if self.height_tile.len() != expected {
+            return Err("height_tile");
+        }
+        if self
+            .material_tile
+            .as_ref()
+            .is_some_and(|tile| tile.len() != expected)
+        {
+            return Err("material_tile");
+        }
+        if self
+            .normal_tile
+            .as_ref()
+            .is_some_and(|tile| tile.len() != expected)
+        {
+            return Err("normal_tile");
+        }
+
+        Ok(())
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.height_tile.len() * std::mem::size_of::<f32>()
+            + self
+                .material_tile
+                .as_ref()
+                .map(|tile| tile.len() * std::mem::size_of::<[f32; 4]>())
+                .unwrap_or(0)
+            + self
+                .normal_tile
+                .as_ref()
+                .map(|tile| tile.len() * std::mem::size_of::<[f32; 3]>())
+                .unwrap_or(0)
+    }
+
+    pub fn height_at(&self, x: u32, y: u32) -> f32 {
+        self.height_tile[(y * self.samples_per_edge + x) as usize]
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -743,10 +820,10 @@ pub struct ChunkPayload {
     pub packed_regions: Option<PackedMeshRegions>,
     pub gd_staging: Option<GdPackedStaging>,
     pub pooled_render_entry: Option<RenderPoolEntry>,
+    pub render_tile: ChunkRenderTilePayload,
+    pub render_tile_handle: Option<RenderTileHandle>,
     pub assets: Vec<AssetInstance>,
-    pub collider_vertices: Option<Vec<[f32; 3]>>,
-    pub collider_indices: Option<Vec<i32>>,
-    pub collider_faces: Option<Vec<[f32; 3]>>,
+    pub collision: ChunkCollisionPayload,
     pub render_lifecycle: RenderLifecycleCommand,
 }
 
@@ -772,10 +849,10 @@ impl Default for ChunkPayload {
             packed_regions: None,
             gd_staging: None,
             pooled_render_entry: None,
+            render_tile: ChunkRenderTilePayload::default(),
+            render_tile_handle: None,
             assets: Vec::new(),
-            collider_vertices: None,
-            collider_indices: None,
-            collider_faces: None,
+            collision: ChunkCollisionPayload::default(),
             render_lifecycle: RenderLifecycleCommand::ColdCreate(
                 RenderFallbackReason::MissingCurrentSurfaceClass,
             ),
@@ -798,6 +875,17 @@ impl ChunkPayload {
                     + self.surface_class.index_bytes
             })
     }
+
+    pub fn render_tile_bytes(&self) -> usize {
+        self.render_tile.byte_len()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChunkCollisionPayload {
+    pub collider_vertices: Option<Vec<[f32; 3]>>,
+    pub collider_indices: Option<Vec<i32>>,
+    pub collider_faces: Option<Vec<[f32; 3]>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -846,6 +934,36 @@ impl Default for RenderResidencyEntry {
             starvation_failure_reported: false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RenderTileHandle {
+    pub slot: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderTileSlotEntry {
+    pub handle: RenderTileHandle,
+    pub key: ChunkKey,
+    pub sample_count: usize,
+    pub byte_len: usize,
+    pub last_touched_tick: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RenderTilePoolState {
+    pub slots: Vec<Option<RenderTileSlotEntry>>,
+    pub key_to_slot: HashMap<ChunkKey, usize>,
+    pub free_slots: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderTilePoolSnapshot {
+    pub total_slots: usize,
+    pub active_slots: usize,
+    pub free_slots: usize,
+    pub resident_bytes: usize,
+    pub eviction_ready_slots: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

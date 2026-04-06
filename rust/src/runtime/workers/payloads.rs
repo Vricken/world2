@@ -28,11 +28,9 @@ pub(crate) struct PreparedRenderPayload {
     pub asset_candidate_count: usize,
     pub asset_rejected_count: usize,
     pub chunk_origin_planet: DVec3,
+    pub render_tile: ChunkRenderTilePayload,
     pub mesh: CpuMeshBuffers,
     pub assets: Vec<AssetInstance>,
-    pub collider_vertices: Option<Vec<[f32; 3]>>,
-    pub collider_indices: Option<Vec<i32>>,
-    pub collider_faces: Option<Vec<[f32; 3]>>,
     pub packed_regions: PackedMeshRegions,
     pub scratch_metrics: WorkerScratchJobMetrics,
 }
@@ -396,6 +394,7 @@ fn build_render_payload_with_scratch(
     let index_count = request.surface_class.index_count as usize;
     let (mesh_reuse, mesh_growth) = scratch.prepare_mesh(vertex_count, index_count);
     growth_events += mesh_growth;
+    let render_tile = ChunkRenderTilePayload::from_samples(samples_per_edge, &scratch.samples);
     derive_cpu_mesh_buffers_into(
         &request.config,
         &scratch.samples,
@@ -429,11 +428,9 @@ fn build_render_payload_with_scratch(
         asset_candidate_count: placement.candidate_count,
         asset_rejected_count: placement.rejected_count,
         chunk_origin_planet: request.chunk_origin_planet,
+        render_tile,
         mesh: scratch.mesh.clone(),
         assets: placement.assets,
-        collider_vertices: None,
-        collider_indices: None,
-        collider_faces: None,
         packed_regions: PackedMeshRegions {
             vertex_region: scratch.vertex_region.clone(),
             attribute_region: scratch.attribute_region.clone(),

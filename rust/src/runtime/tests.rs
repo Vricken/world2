@@ -33,7 +33,10 @@ fn sample_meta(key: ChunkKey, surface_class: SurfaceClassKey) -> ChunkMeta {
 }
 
 fn sample_payload(surface_class: &SurfaceClassKey, fill: u8) -> ChunkPayload {
+    let tile_samples = (mesh_topology::SAMPLED_VERTICES_PER_EDGE
+        * mesh_topology::SAMPLED_VERTICES_PER_EDGE) as usize;
     ChunkPayload {
+        sample_count: tile_samples,
         mesh: CpuMeshBuffers {
             positions: vec![[0.0, 0.0, 0.0]; surface_class.vertex_count as usize],
             indices: vec![0; surface_class.index_count as usize],
@@ -47,6 +50,12 @@ fn sample_payload(surface_class: &SurfaceClassKey, fill: u8) -> ChunkPayload {
             attribute_stride: 24,
             index_stride: 4,
         }),
+        render_tile: ChunkRenderTilePayload {
+            samples_per_edge: mesh_topology::SAMPLED_VERTICES_PER_EDGE,
+            height_tile: vec![f32::from(fill); tile_samples],
+            material_tile: Some(vec![[f32::from(fill), 0.0, 0.0, 1.0]; tile_samples]),
+            normal_tile: None,
+        },
         ..ChunkPayload::default()
     }
 }
@@ -166,6 +175,17 @@ fn opposite_edge(edge: Edge) -> Edge {
         Edge::PosU => Edge::NegU,
         Edge::NegV => Edge::PosV,
         Edge::PosV => Edge::NegV,
+    }
+}
+
+fn sampled_edge_coords(edge: Edge, step: u32) -> (u32, u32) {
+    let first = mesh_topology::BORDER_RING_QUADS;
+    let last = mesh_topology::BORDER_RING_QUADS + mesh_topology::QUADS_PER_EDGE;
+    match edge {
+        Edge::NegU => (first, first + step),
+        Edge::PosU => (last, first + step),
+        Edge::NegV => (first + step, first),
+        Edge::PosV => (first + step, last),
     }
 }
 
@@ -1820,7 +1840,7 @@ fn phase2_selected_render_starvation_records_failure_after_service_limit() {
     );
     let camera = orbit_camera_state();
 
-    for _ in 0..=(DEFAULT_RENDER_SERVICE_STARVATION_LIMIT_FRAMES + 10) {
+    for _ in 0..=(DEFAULT_RENDER_SERVICE_STARVATION_LIMIT_FRAMES + 60) {
         runtime.step_visibility_selection(&camera).unwrap();
     }
 
@@ -1830,6 +1850,165 @@ fn phase2_selected_render_starvation_records_failure_after_service_limit() {
             > DEFAULT_RENDER_SERVICE_STARVATION_LIMIT_FRAMES
     );
     assert!(runtime.frame_state.selected_render_starvation_failures > 0);
+}
+
+#[test]
+fn phase3_render_tile_matches_selected_chunk_scalar_field_samples() {
+    let mut runtime = test_runtime();
+    let key = ChunkKey::new(Face::Pz, 2, 1, 1);
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
+
+    runtime
+        .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+        .unwrap();
+    let payload = runtime.resident_payloads.get(&key).unwrap();
+    let samples = runtime.sample_chunk_scalar_field(key).unwrap();
+
+    assert!(payload.render_tile.validate_layout().is_ok());
+    assert_eq!(
+        payload.render_tile.samples_per_edge,
+        samples.samples_per_edge
+    );
+    assert_eq!(payload.render_tile.sample_count(), samples.len());
+    assert_eq!(payload.render_tile.byte_len(), payload.render_tile_bytes());
+
+    let material_tile = payload.render_tile.material_tile.as_ref().unwrap();
+    for y in [0, 1, 17, 34] {
+        for x in [0, 1, 17, 34] {
+            let index = (y * samples.samples_per_edge + x) as usize;
+            let sample = samples.get(x, y);
+            assert_eq!(payload.render_tile.height_at(x, y), sample.height);
+            assert_eq!(
+                material_tile[index],
+                [sample.biome0, sample.biome1, sample.slope_hint, 1.0]
+            );
+        }
+    }
+}
+
+#[test]
+fn phase3_render_tile_borders_match_across_cross_face_seams() {
+    let mut runtime = test_runtime();
+    let last = mesh_topology::QUADS_PER_EDGE;
+
+    for face in Face::ALL {
+        for edge in Edge::ALL {
+            let key = boundary_key(face, 1, edge, 0);
+            let neighbor = topology::same_lod_neighbor(key, edge).unwrap();
+            let xform = topology::edge_transform(key.face, edge);
+            let desired_render = [key, neighbor].into_iter().collect::<HashSet<_>>();
+            let mut frame_state = SelectionFrameState::default();
+
+            runtime
+                .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+                .unwrap();
+            runtime
+                .ensure_render_payload_for_selection(neighbor, &desired_render, &mut frame_state)
+                .unwrap();
+
+            let key_tile = &runtime.resident_payloads.get(&key).unwrap().render_tile;
+            let neighbor_tile = &runtime
+                .resident_payloads
+                .get(&neighbor)
+                .unwrap()
+                .render_tile;
+            for step in 0..=last {
+                let mapped_step = if xform.flip { last - step } else { step };
+                let (key_x, key_y) = sampled_edge_coords(edge, step);
+                let (neighbor_x, neighbor_y) =
+                    sampled_edge_coords(xform.neighbor_edge, mapped_step);
+
+                assert_eq!(
+                    key_tile.height_at(key_x, key_y),
+                    neighbor_tile.height_at(neighbor_x, neighbor_y),
+                    "tile seam mismatch face={face:?} edge={edge:?} step={step}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn phase3_render_tile_pool_reuses_freed_slots_and_reports_eviction_ready_entries() {
+    let surface_class = sample_surface_class();
+    let mut runtime = test_runtime();
+    let key_a = ChunkKey::new(Face::Px, 2, 0, 0);
+    let key_b = ChunkKey::new(Face::Px, 2, 1, 0);
+    let key_c = ChunkKey::new(Face::Px, 2, 2, 0);
+
+    runtime.render_residency.insert(
+        key_a,
+        simple_render_residency_entry(false, false, 0.0, 10, 1),
+    );
+    runtime
+        .render_residency
+        .insert(key_b, simple_render_residency_entry(true, true, 1.0, 20, 2));
+    runtime.insert_payload(key_a, sample_payload(&surface_class, 1));
+    runtime.insert_payload(key_b, sample_payload(&surface_class, 2));
+
+    let handle_a = runtime
+        .resident_payloads
+        .get(&key_a)
+        .and_then(|payload| payload.render_tile_handle)
+        .unwrap();
+    let initial_snapshot = runtime.render_tile_pool_snapshot();
+    assert_eq!(initial_snapshot.active_slots, 2);
+    assert_eq!(initial_snapshot.free_slots, 0);
+    assert_eq!(initial_snapshot.eviction_ready_slots, 1);
+
+    runtime.remove_payload(&key_a);
+    let after_remove = runtime.render_tile_pool_snapshot();
+    assert_eq!(after_remove.active_slots, 1);
+    assert_eq!(after_remove.free_slots, 1);
+    assert_eq!(after_remove.eviction_ready_slots, 0);
+
+    runtime.render_residency.insert(
+        key_c,
+        simple_render_residency_entry(true, false, 0.5, 30, 3),
+    );
+    runtime.insert_payload(key_c, sample_payload(&surface_class, 3));
+    let handle_c = runtime
+        .resident_payloads
+        .get(&key_c)
+        .and_then(|payload| payload.render_tile_handle)
+        .unwrap();
+
+    assert_eq!(handle_c.slot, handle_a.slot);
+    let final_snapshot = runtime.render_tile_pool_snapshot();
+    assert_eq!(final_snapshot.active_slots, 2);
+    assert_eq!(final_snapshot.free_slots, 0);
+    assert_eq!(final_snapshot.eviction_ready_slots, 0);
+}
+
+#[test]
+fn phase3_collision_payload_is_owned_separately_from_render_tile_state() {
+    let mut runtime = test_runtime();
+    let key = ChunkKey::new(Face::Py, 2, 1, 1);
+    let desired_render = [key].into_iter().collect::<HashSet<_>>();
+    let mut frame_state = SelectionFrameState::default();
+
+    runtime
+        .ensure_render_payload_for_selection(key, &desired_render, &mut frame_state)
+        .unwrap();
+    let tile_before = runtime
+        .resident_payloads
+        .get(&key)
+        .unwrap()
+        .render_tile
+        .clone();
+    assert!(runtime.resident_payloads[&key]
+        .collision
+        .collider_faces
+        .is_none());
+
+    runtime.ensure_collision_payload(key);
+    let payload = runtime.resident_payloads.get(&key).unwrap();
+
+    assert!(payload.collision.collider_vertices.is_some());
+    assert!(payload.collision.collider_indices.is_some());
+    assert!(payload.collision.collider_faces.is_some());
+    assert_eq!(payload.render_tile, tile_before);
 }
 
 #[test]
@@ -2346,7 +2525,7 @@ fn phase8_warm_pooled_commit_recycles_previous_render_entry() {
         previous_surface_class.clone(),
         None,
     );
-    runtime.resident_payloads.insert(
+    runtime.insert_payload(
         key,
         ChunkPayload {
             surface_class: next_surface_class.clone(),

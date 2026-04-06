@@ -11,6 +11,11 @@ pub struct SelectionFrameState {
     pub desired_physics_count: usize,
     pub render_residency_entries: usize,
     pub render_residency_evictions: usize,
+    pub render_tile_bytes: usize,
+    pub render_tile_pool_slots: usize,
+    pub render_tile_pool_active_slots: usize,
+    pub render_tile_pool_free_slots: usize,
+    pub render_tile_eviction_ready_slots: usize,
     pub selected_render_starved_chunks: usize,
     pub selected_render_starvation_failures: usize,
     pub max_selected_render_starvation_frames: u32,
@@ -1059,11 +1064,9 @@ impl PlanetRuntime {
             asset_candidate_count: placement.candidate_count,
             asset_rejected_count: placement.rejected_count,
             chunk_origin_planet: request.chunk_origin_planet,
+            render_tile: samples.to_render_tile_payload(),
             mesh,
             assets: placement.assets,
-            collider_vertices: None,
-            collider_indices: None,
-            collider_faces: None,
             packed_regions,
             scratch_metrics: super::super::workers::payloads::WorkerScratchJobMetrics::default(),
         };
@@ -1082,7 +1085,9 @@ impl PlanetRuntime {
             .resident_payloads
             .get(&key)
             .map(|payload| {
-                payload.surface_class == surface_class && payload.packed_regions.is_some()
+                payload.surface_class == surface_class
+                    && payload.packed_regions.is_some()
+                    && payload.render_tile.validate_layout().is_ok()
             })
             .unwrap_or(false);
         if existing_matches {
@@ -1119,7 +1124,9 @@ impl PlanetRuntime {
                 .resident_payloads
                 .get(&key)
                 .map(|payload| {
-                    payload.surface_class == surface_class && payload.packed_regions.is_some()
+                    payload.surface_class == surface_class
+                        && payload.packed_regions.is_some()
+                        && payload.render_tile.validate_layout().is_ok()
                 })
                 .unwrap_or(false);
             if existing_matches {
@@ -1215,7 +1222,9 @@ impl PlanetRuntime {
             .resident_payloads
             .get(&key)
             .map(|payload| {
-                payload.surface_class == required_surface_class && payload.packed_regions.is_some()
+                payload.surface_class == required_surface_class
+                    && payload.packed_regions.is_some()
+                    && payload.render_tile.validate_layout().is_ok()
             })
             .unwrap_or(false))
     }
@@ -1261,11 +1270,9 @@ impl PlanetRuntime {
             asset_candidate_count,
             asset_rejected_count,
             chunk_origin_planet,
+            render_tile,
             mesh,
             assets,
-            collider_vertices,
-            collider_indices,
-            collider_faces,
             packed_regions,
             ..
         } = prepared;
@@ -1345,10 +1352,10 @@ impl PlanetRuntime {
                 RenderWarmPath::ReusePooledSurface(entry) => Some(entry),
                 _ => None,
             },
+            render_tile,
+            render_tile_handle: None,
             assets,
-            collider_vertices,
-            collider_indices,
-            collider_faces,
+            collision: ChunkCollisionPayload::default(),
             render_lifecycle,
         };
         self.insert_payload(key, payload);
@@ -1378,20 +1385,21 @@ impl PlanetRuntime {
             return;
         };
 
-        if payload.collider_vertices.is_none() {
-            payload.collider_vertices = Some(payload.mesh.positions.clone());
+        if payload.collision.collider_vertices.is_none() {
+            payload.collision.collider_vertices = Some(payload.mesh.positions.clone());
         }
-        if payload.collider_indices.is_none() {
-            payload.collider_indices = Some(payload.mesh.indices.clone());
+        if payload.collision.collider_indices.is_none() {
+            payload.collision.collider_indices = Some(payload.mesh.indices.clone());
         }
-        if payload.collider_faces.is_none() {
-            let Some(vertices) = payload.collider_vertices.as_deref() else {
+        if payload.collision.collider_faces.is_none() {
+            let Some(vertices) = payload.collision.collider_vertices.as_deref() else {
                 return;
             };
-            let Some(indices) = payload.collider_indices.as_deref() else {
+            let Some(indices) = payload.collision.collider_indices.as_deref() else {
                 return;
             };
-            payload.collider_faces = Some(collider_face_vertices_from_indices(vertices, indices));
+            payload.collision.collider_faces =
+                Some(collider_face_vertices_from_indices(vertices, indices));
         }
     }
 }

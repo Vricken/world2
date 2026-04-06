@@ -116,6 +116,11 @@ func _sample_scenario(
 	var selection_cap_hits_sum := 0.0
 	var render_residency_sum := 0.0
 	var render_residency_evictions_sum := 0.0
+	var render_tile_bytes_sum := 0.0
+	var render_tile_pool_slots_sum := 0.0
+	var render_tile_pool_active_slots_sum := 0.0
+	var render_tile_pool_free_slots_sum := 0.0
+	var render_tile_eviction_ready_slots_sum := 0.0
 	var selected_render_starved_sum := 0.0
 	var selected_render_starvation_failures_sum := 0.0
 	var max_selected_render_starvation_frames_sum := 0.0
@@ -136,6 +141,17 @@ func _sample_scenario(
 		selection_cap_hits_sum += float(planet_root.call("runtime_selection_cap_hits"))
 		render_residency_sum += float(planet_root.call("runtime_render_residency_count"))
 		render_residency_evictions_sum += float(planet_root.call("runtime_render_residency_evictions"))
+		render_tile_bytes_sum += float(planet_root.call("runtime_render_tile_bytes"))
+		render_tile_pool_slots_sum += float(planet_root.call("runtime_render_tile_pool_slots"))
+		render_tile_pool_active_slots_sum += float(
+			planet_root.call("runtime_render_tile_pool_active_slots")
+		)
+		render_tile_pool_free_slots_sum += float(
+			planet_root.call("runtime_render_tile_pool_free_slots")
+		)
+		render_tile_eviction_ready_slots_sum += float(
+			planet_root.call("runtime_render_tile_eviction_ready_slots")
+		)
 		selected_render_starved_sum += float(planet_root.call("runtime_selected_render_starved_chunks"))
 		selected_render_starvation_failures_sum += float(
 			planet_root.call("runtime_selected_render_starvation_failures")
@@ -188,6 +204,26 @@ func _sample_scenario(
 	fields.append(
 		"avg_render_residency_evictions=%.4f" %
 		(render_residency_evictions_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_render_tile_mib=%.6f" %
+		((render_tile_bytes_sum / max(frame_count, 1)) / 1048576.0)
+	)
+	fields.append(
+		"avg_render_tile_pool_slots=%.4f" %
+		(render_tile_pool_slots_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_render_tile_pool_active_slots=%.4f" %
+		(render_tile_pool_active_slots_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_render_tile_pool_free_slots=%.4f" %
+		(render_tile_pool_free_slots_sum / max(frame_count, 1))
+	)
+	fields.append(
+		"avg_render_tile_eviction_ready_slots=%.4f" %
+		(render_tile_eviction_ready_slots_sum / max(frame_count, 1))
 	)
 	fields.append(
 		"avg_selected_render_starved=%.4f" %

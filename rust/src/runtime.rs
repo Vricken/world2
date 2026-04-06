@@ -287,6 +287,7 @@ pub struct PlanetRuntime {
     pub active_render: HashSet<ChunkKey>,
     pub active_physics: HashSet<ChunkKey>,
     pub render_residency: HashMap<ChunkKey, RenderResidencyEntry>,
+    pub render_tile_pool: RenderTilePoolState,
     pub resident_payloads: HashMap<ChunkKey, ChunkPayload>,
     pub rid_state: HashMap<ChunkKey, ChunkRidState>,
     pub render_pool: HashMap<SurfaceClassKey, VecDeque<RenderPoolEntry>>,

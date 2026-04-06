@@ -242,6 +242,12 @@ impl PlanetRuntime {
         frame_state.render_residency_entries = self.render_residency.len();
         frame_state.render_pool_entries = self.render_pool_entry_count();
         frame_state.physics_pool_entries = self.physics_pool.len();
+        let tile_pool = self.render_tile_pool_snapshot();
+        frame_state.render_tile_bytes = tile_pool.resident_bytes;
+        frame_state.render_tile_pool_slots = tile_pool.total_slots;
+        frame_state.render_tile_pool_active_slots = tile_pool.active_slots;
+        frame_state.render_tile_pool_free_slots = tile_pool.free_slots;
+        frame_state.render_tile_eviction_ready_slots = tile_pool.eviction_ready_slots;
         let asset_debug = self.asset_debug_snapshot();
         frame_state.phase12_active_groups = asset_debug.active_groups;
         frame_state.phase12_active_instances = asset_debug.active_instances;
@@ -368,7 +374,9 @@ impl PlanetRuntime {
         self.resident_payloads
             .get(&key)
             .map(|payload| {
-                payload.surface_class == *required_surface_class && payload.packed_regions.is_some()
+                payload.surface_class == *required_surface_class
+                    && payload.packed_regions.is_some()
+                    && payload.render_tile.validate_layout().is_ok()
             })
             .unwrap_or(false)
     }
@@ -949,7 +957,7 @@ impl PlanetRuntime {
                 let Some(payload) = self.resident_payloads.get(&key) else {
                     return false;
                 };
-                let Some(collider_faces) = payload.collider_faces.as_deref() else {
+                let Some(collider_faces) = payload.collision.collider_faces.as_deref() else {
                     return false;
                 };
                 PackedVector3Array::from_iter(
@@ -1617,5 +1625,6 @@ impl PlanetRuntime {
 
         self.active_render.clear();
         self.active_physics.clear();
+        self.render_tile_pool = RenderTilePoolState::default();
     }
 }

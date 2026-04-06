@@ -26,6 +26,7 @@ impl PlanetRuntime {
             active_render: HashSet::new(),
             active_physics: HashSet::new(),
             render_residency: HashMap::new(),
+            render_tile_pool: RenderTilePoolState::default(),
             resident_payloads: HashMap::new(),
             rid_state: HashMap::new(),
             render_pool: HashMap::new(),
@@ -177,7 +178,18 @@ impl PlanetRuntime {
         .map_err(|_| TopologyError::InvalidChunkKey)
     }
 
-    pub fn insert_payload(&mut self, key: ChunkKey, payload: ChunkPayload) -> Option<ChunkPayload> {
+    pub fn insert_payload(
+        &mut self,
+        key: ChunkKey,
+        mut payload: ChunkPayload,
+    ) -> Option<ChunkPayload> {
+        let handle = self.assign_render_tile_slot(
+            key,
+            payload.render_tile.sample_count(),
+            payload.render_tile.byte_len(),
+            payload.payload_epoch,
+        );
+        payload.render_tile_handle = Some(handle);
         if let Some(entry) = self.render_residency.get_mut(&key) {
             entry.resident_surface_class = Some(payload.surface_class.clone());
         }
@@ -189,6 +201,7 @@ impl PlanetRuntime {
     }
 
     pub fn remove_payload(&mut self, key: &ChunkKey) -> Option<ChunkPayload> {
+        self.release_render_tile_slot(key);
         if let Some(entry) = self.render_residency.get_mut(key) {
             entry.resident_surface_class = None;
         }
@@ -224,8 +237,7 @@ impl PlanetRuntime {
                 break;
             }
 
-            if let Some(payload) = self.resident_payloads.remove(&key) {
-                self.reclaim_payload_resources(payload);
+            if self.remove_payload(&key).is_some() {
                 evicted.push(key);
                 payload_count -= 1;
             }
@@ -350,6 +362,35 @@ impl PlanetRuntime {
         self.render_residency.len()
     }
 
+    pub fn render_tile_pool_snapshot(&self) -> RenderTilePoolSnapshot {
+        let resident_bytes = self
+            .render_tile_pool
+            .slots
+            .iter()
+            .flatten()
+            .map(|entry| entry.byte_len)
+            .sum();
+        let eviction_ready_slots = self
+            .render_tile_pool
+            .key_to_slot
+            .keys()
+            .filter(|key| {
+                self.render_residency
+                    .get(key)
+                    .map(|entry| !entry.desired && !entry.active)
+                    .unwrap_or(true)
+            })
+            .count();
+
+        RenderTilePoolSnapshot {
+            total_slots: self.render_tile_pool.slots.len(),
+            active_slots: self.render_tile_pool.key_to_slot.len(),
+            free_slots: self.render_tile_pool.free_slots.len(),
+            resident_bytes,
+            eviction_ready_slots,
+        }
+    }
+
     pub fn rid_state_count(&self) -> usize {
         self.rid_state.len()
     }
@@ -413,5 +454,47 @@ impl PlanetRuntime {
         }
 
         snapshot
+    }
+
+    pub fn assign_render_tile_slot(
+        &mut self,
+        key: ChunkKey,
+        sample_count: usize,
+        byte_len: usize,
+        last_touched_tick: u64,
+    ) -> RenderTileHandle {
+        let slot = self
+            .render_tile_pool
+            .key_to_slot
+            .get(&key)
+            .copied()
+            .or_else(|| self.render_tile_pool.free_slots.pop())
+            .unwrap_or_else(|| {
+                let slot = self.render_tile_pool.slots.len();
+                self.render_tile_pool.slots.push(None);
+                slot
+            });
+        let handle = RenderTileHandle { slot };
+        self.render_tile_pool.key_to_slot.insert(key, slot);
+        self.render_tile_pool.slots[slot] = Some(RenderTileSlotEntry {
+            handle,
+            key,
+            sample_count,
+            byte_len,
+            last_touched_tick,
+        });
+        handle
+    }
+
+    pub fn release_render_tile_slot(&mut self, key: &ChunkKey) -> Option<RenderTileHandle> {
+        let slot = self.render_tile_pool.key_to_slot.remove(key)?;
+        let handle = self
+            .render_tile_pool
+            .slots
+            .get_mut(slot)
+            .and_then(Option::take)
+            .map(|entry| entry.handle);
+        self.render_tile_pool.free_slots.push(slot);
+        handle
     }
 }
