@@ -2840,6 +2840,12 @@ fn phase4_gpu_custom_aabb_contains_visible_chunk_vertices() {
             meta.metrics.geometric_error,
         )
         .unwrap();
+    let cached_aabb = payload
+        .gpu_custom_aabb
+        .expect("prepared payload should cache a conservative gpu custom aabb")
+        .to_aabb();
+
+    assert_eq!(cached_aabb, aabb);
 
     for position in &payload.mesh.positions {
         let local = Vector3::new(position[0], position[1], position[2]);

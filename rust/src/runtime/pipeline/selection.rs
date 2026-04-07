@@ -1046,13 +1046,9 @@ impl PlanetRuntime {
         frame_state: &mut SelectionFrameState,
     ) -> Result<usize, TopologyError> {
         let desired_physics = HashSet::new();
-        let Some(request) = self.prepare_render_payload_request(
-            0,
-            0,
-            key,
-            desired_render,
-            &desired_physics,
-        )? else {
+        let Some(request) =
+            self.prepare_render_payload_request(0, 0, key, desired_render, &desired_physics)?
+        else {
             return Ok(self.payload_upload_bytes(key));
         };
 
@@ -1077,6 +1073,7 @@ impl PlanetRuntime {
             asset_candidate_count: placement.candidate_count,
             asset_rejected_count: placement.rejected_count,
             chunk_origin_planet: request.chunk_origin_planet,
+            gpu_custom_aabb: None,
             render_tile: samples.to_render_tile_payload(),
             mesh,
             assets: placement.assets,
@@ -1087,7 +1084,11 @@ impl PlanetRuntime {
         Ok(self.install_prepared_render_payload(prepared, frame_state))
     }
 
-    fn payload_requirements_for_key(&self, desired_physics: &HashSet<ChunkKey>, key: ChunkKey) -> PayloadBuildRequirements {
+    fn payload_requirements_for_key(
+        &self,
+        desired_physics: &HashSet<ChunkKey>,
+        key: ChunkKey,
+    ) -> PayloadBuildRequirements {
         PayloadBuildRequirements::new(
             self.config.render_backend == RenderBackendKind::ServerPool,
             desired_physics.contains(&key) || self.active_physics.contains(&key),
@@ -1118,19 +1119,23 @@ impl PlanetRuntime {
         let existing_matches = self
             .resident_payloads
             .get(&key)
-            .map(|payload| self.payload_satisfies_requirements(payload, &surface_class, requirements))
+            .map(|payload| {
+                self.payload_satisfies_requirements(payload, &surface_class, requirements)
+            })
             .unwrap_or(false);
         if existing_matches {
             return Ok(None);
         }
 
+        let meta = self.ensure_chunk_meta(key)?;
         Ok(Some(RenderPayloadRequest {
             sequence,
             epoch,
             key,
             surface_class,
             requirements,
-            chunk_origin_planet: self.ensure_chunk_meta(key)?.bounds.center_planet,
+            chunk_origin_planet: meta.bounds.center_planet,
+            geometric_error: meta.metrics.geometric_error,
             config: self.config.clone(),
         }))
     }
@@ -1156,7 +1161,9 @@ impl PlanetRuntime {
             let existing_matches = self
                 .resident_payloads
                 .get(&key)
-                .map(|payload| self.payload_satisfies_requirements(payload, &surface_class, requirements))
+                .map(|payload| {
+                    self.payload_satisfies_requirements(payload, &surface_class, requirements)
+                })
                 .unwrap_or(false);
             if existing_matches {
                 self.pending_payload_requests.remove(&key);
@@ -1177,15 +1184,13 @@ impl PlanetRuntime {
 
             let epoch = self.next_payload_request_epoch;
             self.next_payload_request_epoch = self.next_payload_request_epoch.saturating_add(1);
-            if let Some(request) =
-                self.prepare_render_payload_request(
-                    requests.len(),
-                    epoch,
-                    key,
-                    desired_render,
-                    desired_physics,
-                )?
-            {
+            if let Some(request) = self.prepare_render_payload_request(
+                requests.len(),
+                epoch,
+                key,
+                desired_render,
+                desired_physics,
+            )? {
                 self.pending_payload_requests.insert(
                     key,
                     PendingPayloadRequest {
@@ -1312,6 +1317,7 @@ impl PlanetRuntime {
             asset_candidate_count,
             asset_rejected_count,
             chunk_origin_planet,
+            gpu_custom_aabb,
             render_tile,
             mesh,
             assets,
@@ -1411,6 +1417,7 @@ impl PlanetRuntime {
             },
             render_tile,
             render_tile_handle: None,
+            gpu_custom_aabb,
             assets,
             collision: ChunkCollisionPayload::default(),
             render_lifecycle,

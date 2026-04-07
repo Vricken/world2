@@ -556,6 +556,28 @@ impl ChunkSample {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CachedAabb {
+    pub position: [f32; 3],
+    pub size: [f32; 3],
+}
+
+impl CachedAabb {
+    pub fn from_min_max(min: Vector3, max: Vector3) -> Self {
+        Self {
+            position: [min.x, min.y, min.z],
+            size: [max.x - min.x, max.y - min.y, max.z - min.z],
+        }
+    }
+
+    pub fn to_aabb(self) -> Aabb {
+        Aabb::new(
+            Vector3::new(self.position[0], self.position[1], self.position[2]),
+            Vector3::new(self.size[0], self.size[1], self.size[2]),
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChunkSampleGrid {
     pub samples_per_edge: u32,
@@ -822,6 +844,7 @@ pub struct ChunkPayload {
     pub pooled_render_entry: Option<RenderPoolEntry>,
     pub render_tile: ChunkRenderTilePayload,
     pub render_tile_handle: Option<RenderTileHandle>,
+    pub gpu_custom_aabb: Option<CachedAabb>,
     pub assets: Vec<AssetInstance>,
     pub collision: ChunkCollisionPayload,
     pub render_lifecycle: RenderLifecycleCommand,
@@ -875,6 +898,7 @@ impl Default for ChunkPayload {
             pooled_render_entry: None,
             render_tile: ChunkRenderTilePayload::default(),
             render_tile_handle: None,
+            gpu_custom_aabb: None,
             assets: Vec::new(),
             collision: ChunkCollisionPayload::default(),
             render_lifecycle: RenderLifecycleCommand::ColdCreate(
@@ -921,7 +945,8 @@ impl ChunkPayload {
         if let Some(vertices) = self.collision.collider_vertices.as_ref() {
             bytes = bytes.saturating_add(vertices.len() * std::mem::size_of::<[f32; 3]>());
         } else if self.has_collision_mesh_data() {
-            bytes = bytes.saturating_add(self.mesh.positions.len() * std::mem::size_of::<[f32; 3]>());
+            bytes =
+                bytes.saturating_add(self.mesh.positions.len() * std::mem::size_of::<[f32; 3]>());
         }
 
         if let Some(indices) = self.collision.collider_indices.as_ref() {
@@ -979,6 +1004,8 @@ pub struct GpuMaterialPoolEntry {
     pub material_texture: Option<Gd<ImageTexture>>,
     pub height_image: Option<Gd<Image>>,
     pub material_image: Option<Gd<Image>>,
+    pub height_bytes: Option<PackedByteArray>,
+    pub material_bytes: Option<PackedByteArray>,
 }
 
 impl GpuMaterialPoolEntry {
@@ -990,6 +1017,8 @@ impl GpuMaterialPoolEntry {
             material_texture: None,
             height_image: None,
             material_image: None,
+            height_bytes: None,
+            material_bytes: None,
         }
     }
 }

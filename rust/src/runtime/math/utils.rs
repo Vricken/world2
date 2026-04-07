@@ -53,6 +53,57 @@ pub(crate) fn write_rgba8(bytes: &mut [u8], value: [f32; 4]) {
     }
 }
 
+pub(crate) fn copy_f32_slice_to_packed_bytes(bytes: &mut PackedByteArray, values: &[f32]) {
+    let byte_len = std::mem::size_of_val(values);
+    if bytes.len() != byte_len {
+        bytes.resize(byte_len);
+    }
+
+    let dst = bytes.as_mut_slice();
+    #[cfg(target_endian = "little")]
+    {
+        let src = unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), byte_len) };
+        dst.copy_from_slice(src);
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for (chunk, value) in dst
+            .chunks_exact_mut(std::mem::size_of::<f32>())
+            .zip(values.iter())
+        {
+            chunk.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+pub(crate) fn copy_f32x4_slice_to_packed_bytes(bytes: &mut PackedByteArray, values: &[[f32; 4]]) {
+    let byte_len = values.len() * std::mem::size_of::<[f32; 4]>();
+    if bytes.len() != byte_len {
+        bytes.resize(byte_len);
+    }
+
+    let dst = bytes.as_mut_slice();
+    #[cfg(target_endian = "little")]
+    {
+        let src = unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), byte_len) };
+        dst.copy_from_slice(src);
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for (chunk, sample) in dst
+            .chunks_exact_mut(std::mem::size_of::<[f32; 4]>())
+            .zip(values.iter())
+        {
+            for (channel_bytes, value) in chunk
+                .chunks_exact_mut(std::mem::size_of::<f32>())
+                .zip(sample.iter())
+            {
+                channel_bytes.copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+}
+
 pub(crate) fn distance_sort_key(distance: f64) -> u64 {
     if !distance.is_finite() {
         u64::MAX

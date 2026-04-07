@@ -901,29 +901,20 @@ impl PlanetRuntime {
         key: ChunkKey,
         frame_state: &mut SelectionFrameState,
     ) -> bool {
-        let (surface_class, chunk_origin_planet, render_tile, chunk_bounds, geometric_error) = {
+        let (surface_class, chunk_origin_planet, cached_gpu_custom_aabb) = {
             let Some(payload) = self.resident_payloads.get(&key) else {
                 return false;
             };
-            let surface_class = payload.surface_class.clone();
-            let chunk_origin_planet = payload.chunk_origin_planet;
-            let render_tile = payload.render_tile.clone();
-            let _ = payload;
-            let Ok(meta) = self.ensure_chunk_meta(key) else {
-                return false;
-            };
             (
-                surface_class,
-                chunk_origin_planet,
-                render_tile,
-                meta.bounds,
-                meta.metrics.geometric_error,
+                payload.surface_class.clone(),
+                payload.chunk_origin_planet,
+                payload.gpu_custom_aabb,
             )
         };
-
-        if render_tile.validate_layout().is_err() {
+        let Ok(meta) = self.ensure_chunk_meta(key) else {
             return false;
-        }
+        };
+        let chunk_bounds = meta.bounds;
 
         let render_transform = self.render_transform_for_chunk(chunk_origin_planet);
         let render_instance_rid = self.take_or_create_gpu_render_instance(key);
@@ -943,15 +934,30 @@ impl PlanetRuntime {
             self.recycle_gpu_material_entry(material_entry);
             return false;
         };
-        let chunk_aabb = self
-            .gpu_chunk_custom_aabb(key, chunk_origin_planet, &render_tile, geometric_error)
+        let chunk_aabb = cached_gpu_custom_aabb
+            .map(CachedAabb::to_aabb)
             .unwrap_or_else(|| self.chunk_custom_aabb(chunk_bounds));
 
         if self.should_commit_to_servers() {
-            if !self.update_gpu_material_entry(
+            let Some(shader) = self.ensure_terrain_shader() else {
+                self.recycle_gpu_material_entry(material_entry);
+                return false;
+            };
+            let Some(payload) = self.resident_payloads.get(&key) else {
+                self.recycle_gpu_material_entry(material_entry);
+                return false;
+            };
+            if payload.render_tile.validate_layout().is_err() {
+                self.recycle_gpu_material_entry(material_entry);
+                return false;
+            }
+            if !Self::update_gpu_material_entry(
+                &shader,
+                self.config.planet_radius,
+                self.face_index(key.face),
                 key,
                 chunk_origin_planet,
-                &render_tile,
+                &payload.render_tile,
                 &mut material_entry,
             ) {
                 self.recycle_gpu_material_entry(material_entry);
@@ -988,7 +994,11 @@ impl PlanetRuntime {
         rid_state.pooled_surface_class = Some(surface_class);
         rid_state.gd_staging = None;
         self.gpu_active_materials.insert(key, material_entry);
-        frame_state.gpu_tile_upload_bytes += render_tile.byte_len();
+        frame_state.gpu_tile_upload_bytes += self
+            .resident_payloads
+            .get(&key)
+            .map(|payload| payload.render_tile.byte_len())
+            .unwrap_or(0);
         frame_state.gpu_material_binds += 1;
         frame_state.active_gpu_render_chunks = self.gpu_active_materials.len();
         frame_state.canonical_render_meshes = self.canonical_render_meshes.len();
@@ -1307,48 +1317,57 @@ impl PlanetRuntime {
     }
 
     fn update_gpu_material_entry(
-        &mut self,
+        shader: &Gd<Shader>,
+        planet_radius: f64,
+        face_index: i32,
         key: ChunkKey,
         chunk_origin_planet: DVec3,
         render_tile: &ChunkRenderTilePayload,
         entry: &mut GpuMaterialPoolEntry,
     ) -> bool {
-        let Some(shader) = self.ensure_terrain_shader() else {
-            return false;
-        };
-
         let height_image = entry.height_image.take().unwrap_or_else(Image::new_gd);
         let height_texture = entry
             .height_texture
             .take()
             .unwrap_or_else(ImageTexture::new_gd);
+        let height_bytes = entry
+            .height_bytes
+            .take()
+            .unwrap_or_else(PackedByteArray::new);
         let material_image = entry.material_image.take().unwrap_or_else(Image::new_gd);
         let material_texture = entry
             .material_texture
             .take()
             .unwrap_or_else(ImageTexture::new_gd);
+        let material_bytes = entry
+            .material_bytes
+            .take()
+            .unwrap_or_else(PackedByteArray::new);
         let mut shader_material = entry
             .shader_material
             .take()
             .unwrap_or_else(ShaderMaterial::new_gd);
 
-        let Some(height_image) = self.populate_height_image(height_image, render_tile) else {
+        let Some((height_image, height_bytes)) =
+            Self::populate_height_image(height_image, height_bytes, render_tile)
+        else {
             return false;
         };
-        let Some(material_image) = self.populate_material_image(material_image, render_tile) else {
+        let Some((material_image, material_bytes)) =
+            Self::populate_material_image(material_image, material_bytes, render_tile)
+        else {
             return false;
         };
-        let height_texture = self.update_image_texture(height_texture, &height_image);
-        let material_texture = self.update_image_texture(material_texture, &material_image);
+        let height_texture = Self::update_image_texture(height_texture, &height_image);
+        let material_texture = Self::update_image_texture(material_texture, &material_image);
         let face_resolution = ChunkKey::resolution_for_lod(key.lod) as f32;
 
-        shader_material.set_shader(&shader);
+        shader_material.set_shader(shader);
         shader_material.set_shader_parameter("height_tile", &height_texture.to_variant());
         shader_material.set_shader_parameter("material_tile", &material_texture.to_variant());
-        shader_material
-            .set_shader_parameter("planet_radius", &self.config.planet_radius.to_variant());
+        shader_material.set_shader_parameter("planet_radius", &planet_radius.to_variant());
         shader_material.set_shader_parameter("face_resolution", &face_resolution.to_variant());
-        shader_material.set_shader_parameter("face_index", &self.face_index(key.face).to_variant());
+        shader_material.set_shader_parameter("face_index", &face_index.to_variant());
         shader_material.set_shader_parameter("chunk_x", &f64::from(key.x).to_variant());
         shader_material.set_shader_parameter("chunk_y", &f64::from(key.y).to_variant());
         shader_material.set_shader_parameter(
@@ -1361,23 +1380,17 @@ impl PlanetRuntime {
         entry.material_texture = Some(material_texture);
         entry.height_image = Some(height_image);
         entry.material_image = Some(material_image);
+        entry.height_bytes = Some(height_bytes);
+        entry.material_bytes = Some(material_bytes);
         true
     }
 
     fn populate_height_image(
-        &self,
         mut image: Gd<Image>,
+        mut bytes: PackedByteArray,
         render_tile: &ChunkRenderTilePayload,
-    ) -> Option<Gd<Image>> {
-        let mut bytes = PackedByteArray::new();
-        bytes.resize(render_tile.height_tile.len() * std::mem::size_of::<f32>());
-        for (index, value) in render_tile.height_tile.iter().copied().enumerate() {
-            let offset = index * std::mem::size_of::<f32>();
-            bytes
-                .as_mut_slice()
-                .get_mut(offset..offset + std::mem::size_of::<f32>())?
-                .copy_from_slice(&value.to_le_bytes());
-        }
+    ) -> Option<(Gd<Image>, PackedByteArray)> {
+        copy_f32_slice_to_packed_bytes(&mut bytes, render_tile.height_tile.as_slice());
         image.set_data(
             render_tile.samples_per_edge as i32,
             render_tile.samples_per_edge as i32,
@@ -1385,31 +1398,30 @@ impl PlanetRuntime {
             ImageFormat::RF,
             &bytes,
         );
-        Some(image)
+        Some((image, bytes))
     }
 
     fn populate_material_image(
-        &self,
         mut image: Gd<Image>,
+        mut bytes: PackedByteArray,
         render_tile: &ChunkRenderTilePayload,
-    ) -> Option<Gd<Image>> {
-        let source = render_tile
-            .material_tile
-            .as_ref()
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let default_sample = [0.0_f32, 0.0, 0.0, 1.0];
-        let mut bytes = PackedByteArray::new();
-        bytes.resize(render_tile.sample_count() * 4 * std::mem::size_of::<f32>());
-        for index in 0..render_tile.sample_count() {
-            let sample = source.get(index).copied().unwrap_or(default_sample);
-            let offset = index * 4 * std::mem::size_of::<f32>();
-            for (channel, value) in sample.into_iter().enumerate() {
-                let start = offset + channel * std::mem::size_of::<f32>();
-                bytes
-                    .as_mut_slice()
-                    .get_mut(start..start + std::mem::size_of::<f32>())?
-                    .copy_from_slice(&value.to_le_bytes());
+    ) -> Option<(Gd<Image>, PackedByteArray)> {
+        if let Some(source) = render_tile.material_tile.as_ref() {
+            copy_f32x4_slice_to_packed_bytes(&mut bytes, source.as_slice());
+        } else {
+            let sample_bytes = std::mem::size_of::<[f32; 4]>();
+            let byte_len = render_tile.sample_count() * sample_bytes;
+            if bytes.len() != byte_len {
+                bytes.resize(byte_len);
+            }
+            let default_sample = [0.0_f32, 0.0, 0.0, 1.0];
+            for chunk in bytes.as_mut_slice().chunks_exact_mut(sample_bytes) {
+                for (channel_bytes, value) in chunk
+                    .chunks_exact_mut(std::mem::size_of::<f32>())
+                    .zip(default_sample.iter())
+                {
+                    channel_bytes.copy_from_slice(&value.to_le_bytes());
+                }
             }
         }
         image.set_data(
@@ -1419,14 +1431,10 @@ impl PlanetRuntime {
             ImageFormat::RGBAF,
             &bytes,
         );
-        Some(image)
+        Some((image, bytes))
     }
 
-    fn update_image_texture(
-        &self,
-        mut texture: Gd<ImageTexture>,
-        image: &Gd<Image>,
-    ) -> Gd<ImageTexture> {
+    fn update_image_texture(mut texture: Gd<ImageTexture>, image: &Gd<Image>) -> Gd<ImageTexture> {
         if texture.get_width() == 0 {
             texture.set_image(image);
         } else {
@@ -1454,6 +1462,7 @@ impl PlanetRuntime {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn gpu_chunk_custom_aabb(
         &self,
         key: ChunkKey,
@@ -2000,22 +2009,16 @@ impl PlanetRuntime {
                     .ok()
                     .flatten()
                 {
-                    let custom_aabb =
-                        if self.config.render_backend == RenderBackendKind::GpuDisplacedCanonical {
-                            self.resident_payloads
-                                .get(key)
-                                .and_then(|payload| {
-                                    self.gpu_chunk_custom_aabb(
-                                        *key,
-                                        payload.chunk_origin_planet,
-                                        &payload.render_tile,
-                                        meta.metrics.geometric_error,
-                                    )
-                                })
-                                .unwrap_or_else(|| self.chunk_custom_aabb(meta.bounds))
-                        } else {
-                            self.chunk_custom_aabb(meta.bounds)
-                        };
+                    let custom_aabb = if self.config.render_backend
+                        == RenderBackendKind::GpuDisplacedCanonical
+                    {
+                        self.resident_payloads
+                            .get(key)
+                            .and_then(|payload| payload.gpu_custom_aabb.map(CachedAabb::to_aabb))
+                            .unwrap_or_else(|| self.chunk_custom_aabb(meta.bounds))
+                    } else {
+                        self.chunk_custom_aabb(meta.bounds)
+                    };
                     rendering_server.instance_set_custom_aabb(render_instance_rid, custom_aabb);
                 }
                 frame_state.phase10_render_transform_rebinds += 1;

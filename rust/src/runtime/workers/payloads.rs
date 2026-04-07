@@ -8,6 +8,7 @@ pub(crate) struct RenderPayloadRequest {
     pub surface_class: SurfaceClassKey,
     pub requirements: PayloadBuildRequirements,
     pub chunk_origin_planet: DVec3,
+    pub geometric_error: f32,
     pub config: RuntimeConfig,
 }
 
@@ -29,6 +30,7 @@ pub(crate) struct PreparedRenderPayload {
     pub asset_candidate_count: usize,
     pub asset_rejected_count: usize,
     pub chunk_origin_planet: DVec3,
+    pub gpu_custom_aabb: Option<CachedAabb>,
     pub render_tile: ChunkRenderTilePayload,
     pub mesh: CpuMeshBuffers,
     pub assets: Vec<AssetInstance>,
@@ -393,6 +395,13 @@ fn build_render_payload_with_scratch(
     );
 
     let render_tile = ChunkRenderTilePayload::from_samples(samples_per_edge, &scratch.samples);
+    let gpu_custom_aabb = cached_gpu_chunk_aabb_from_samples(
+        request.config.planet_radius,
+        request.chunk_origin_planet,
+        request.geometric_error,
+        samples_per_edge,
+        &scratch.samples,
+    );
     let mut mesh_reuse = false;
     let mut pack_reuse = false;
     let mut mesh = CpuMeshBuffers::default();
@@ -454,6 +463,7 @@ fn build_render_payload_with_scratch(
         asset_candidate_count: placement.candidate_count,
         asset_rejected_count: placement.rejected_count,
         chunk_origin_planet: request.chunk_origin_planet,
+        gpu_custom_aabb,
         render_tile,
         mesh,
         assets: placement.assets,
@@ -466,6 +476,43 @@ fn build_render_payload_with_scratch(
             growth_events,
         },
     }
+}
+
+fn cached_gpu_chunk_aabb_from_samples(
+    planet_radius: f64,
+    chunk_origin_planet: DVec3,
+    geometric_error: f32,
+    samples_per_edge: u32,
+    samples: &[ChunkSample],
+) -> Option<CachedAabb> {
+    if samples_per_edge != mesh_topology::SAMPLED_VERTICES_PER_EDGE {
+        return None;
+    }
+
+    let visible_last = mesh_topology::QUADS_PER_EDGE;
+    let border = mesh_topology::BORDER_RING_QUADS;
+    let mut min = Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut max = Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+    for y in 0..=visible_last {
+        for x in 0..=visible_last {
+            let sample_index = ((y + border) * samples_per_edge + (x + border)) as usize;
+            let sample = samples.get(sample_index)?;
+            let displaced_point = sample.displaced_point(planet_radius);
+            let local = planet_to_chunk_local_f32(displaced_point, chunk_origin_planet);
+            min.x = min.x.min(local[0]);
+            min.y = min.y.min(local[1]);
+            min.z = min.z.min(local[2]);
+            max.x = max.x.max(local[0]);
+            max.y = max.y.max(local[1]);
+            max.z = max.z.max(local[2]);
+        }
+    }
+
+    let padding = geometric_error.max(0.5);
+    min -= Vector3::new(padding, padding, padding);
+    max += Vector3::new(padding, padding, padding);
+    Some(CachedAabb::from_min_max(min, max))
 }
 
 fn keys_overlap_hierarchically(a: ChunkKey, b: ChunkKey) -> bool {
