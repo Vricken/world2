@@ -1,6 +1,7 @@
 mod assets;
 mod core;
 mod data;
+mod legacy;
 mod math;
 mod pipeline;
 mod strategy;
