@@ -2,6 +2,8 @@
 
 This folder breaks the GPU refactor into ordered, testable phases.
 
+As of 2026-04-07, the shipped runtime has completed Phases 01-06. Phase 06 records the final acceptance benchmark and any remaining deferred work.
+
 The sequence is intentionally conservative:
 
 1. establish the target runtime and acceptance checks

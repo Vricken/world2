@@ -66,20 +66,20 @@ The concrete end state of this refactor is:
 
 ## Refactor Checklist
 
-- [ ] Phase 01 completed.
-- [ ] Phase 02 completed.
-- [ ] Phase 03 completed.
-- [ ] Phase 04 completed.
-- [ ] Phase 05 completed.
-- [ ] Phase 06 completed.
-- [ ] Small window vs fullscreen chunk counts settle within the target tolerance.
-- [ ] Fullscreen no longer causes a multi-x deferred render commit spike.
+- [x] Phase 01 completed.
+- [x] Phase 02 completed.
+- [x] Phase 03 completed.
+- [x] Phase 04 completed.
+- [x] Phase 05 completed.
+- [x] Phase 06 completed.
+- [x] Small window vs fullscreen chunk counts settle within the target tolerance.
+- [x] Fullscreen no longer causes a multi-x deferred render commit spike.
 - [ ] Near-player visual detail remains acceptable.
-- [ ] Collision behavior remains correct through the render refactor.
-- [ ] Default scene validation completed.
-- [ ] `300 km` scene validation completed.
-- [ ] Profiling harness outputs updated to reflect final runtime behavior.
-- [ ] Runtime docs match shipped behavior.
+- [x] Collision behavior remains correct through the render refactor.
+- [x] Default scene validation completed.
+- [x] `300 km` scene validation completed.
+- [x] Profiling harness outputs updated to reflect final runtime behavior.
+- [x] Runtime docs match shipped behavior.
 
 ## Reusable Test Matrix
 

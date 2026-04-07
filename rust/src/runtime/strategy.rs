@@ -262,8 +262,7 @@ fn default_projected_error_px(
     let distance = (meta.bounds.center_planet - camera.position_planet)
         .length()
         .max(f64::from(f32::EPSILON));
-    let reference_height_px =
-        camera.effective_lod_reference_height_px(config.render_lod_reference_height_px);
+    let reference_height_px = config.render_lod_reference_height_px.max(1.0);
     let projection_scale = camera.projection_scale
         * (f64::from(reference_height_px) / f64::from(camera.viewport_height_px.max(1.0)));
 

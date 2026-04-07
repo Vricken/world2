@@ -21,8 +21,6 @@ use runtime::{
 use topology::{DEFAULT_MAX_LOD, DIRECTED_EDGE_TRANSFORM_COUNT, MAX_SUPPORTED_MAX_LOD};
 
 const PROJECT_SETTING_MAX_LOD_CAP: &str = "world2/runtime/max_lod_cap";
-const PROJECT_SETTING_DEBUG_LOD_VIEWPORT_HEIGHT_OVERRIDE: &str =
-    "world2/debug/lod_viewport_height_override";
 const EDITOR_PREVIEW_NODE_NAME: &str = "__World2EditorPreview";
 const ATMOSPHERE_NODE_NAME: &str = "PlanetAtmosphere";
 const ATMOSPHERE_PLANET_RADIUS_PROPERTY: &str = "planet_radius";
@@ -51,7 +49,7 @@ pub struct PlanetRoot {
     #[export]
     keep_coarse_lod_chunks_rendered: bool,
     #[export]
-    use_gpu_displaced_render_backend: bool,
+    debug_force_server_pool_render_backend: bool,
     editor_preview_radius_applied: f64,
     editor_preview: Option<Gd<MeshInstance3D>>,
 }
@@ -69,7 +67,7 @@ impl INode3D for PlanetRoot {
             atmosphere_height: 0.2,
             frustum_culling_enabled: runtime.config.enable_frustum_culling,
             keep_coarse_lod_chunks_rendered: runtime.config.keep_coarse_lod_chunks_rendered,
-            use_gpu_displaced_render_backend: true,
+            debug_force_server_pool_render_backend: false,
             runtime,
             runtime_tick_count: 0,
             runtime_camera_clip_bootstrapped: false,
@@ -321,7 +319,7 @@ impl PlanetRoot {
         config.dense_metadata_prebuild_max_lod = DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD;
         config.enable_frustum_culling = self.frustum_culling_enabled;
         config.keep_coarse_lod_chunks_rendered = self.keep_coarse_lod_chunks_rendered;
-        if !self.use_gpu_displaced_render_backend {
+        if self.debug_force_server_pool_render_backend {
             config.render_backend = runtime::RenderBackendKind::ServerPool;
         }
         config
@@ -344,25 +342,6 @@ impl PlanetRoot {
             .to::<i64>()
             .clamp(0, i64::from(MAX_SUPPORTED_MAX_LOD));
         raw as u8
-    }
-
-    fn project_lod_viewport_height_override() -> Option<f32> {
-        let mut settings = ProjectSettings::singleton();
-        let has_setting = settings
-            .call(
-                "has_setting",
-                &[PROJECT_SETTING_DEBUG_LOD_VIEWPORT_HEIGHT_OVERRIDE.to_variant()],
-            )
-            .to::<bool>();
-        if !has_setting {
-            return None;
-        }
-
-        let override_px = settings
-            .get(PROJECT_SETTING_DEBUG_LOD_VIEWPORT_HEIGHT_OVERRIDE)
-            .to::<f64>()
-            .max(0.0) as f32;
-        (override_px > 0.0).then_some(override_px)
     }
 
     fn sync_editor_preview(&mut self) {
@@ -911,7 +890,6 @@ impl PlanetRoot {
             raw.frustum_planes,
             raw.fov_y_degrees,
             raw.viewport_height_px,
-            raw.lod_reference_height_px_override,
             self.runtime.origin_snapshot(),
         ))
     }
@@ -944,7 +922,6 @@ impl PlanetRoot {
             frustum_planes,
             fov_y_degrees: camera.get_fov(),
             viewport_height_px,
-            lod_reference_height_px_override: Self::project_lod_viewport_height_override(),
         })
     }
 
@@ -1023,7 +1000,6 @@ struct RawCameraState {
     frustum_planes: [Plane; 6],
     fov_y_degrees: f32,
     viewport_height_px: f32,
-    lod_reference_height_px_override: Option<f32>,
 }
 
 struct World2Extension;
@@ -1031,7 +1007,6 @@ struct World2Extension;
 fn register_world2_project_settings() {
     let mut settings = ProjectSettings::singleton();
     let default_cap = i64::from(DEFAULT_MAX_LOD);
-    let default_lod_viewport_height_override = 0.0_f64;
     let has_setting = settings
         .call("has_setting", &[PROJECT_SETTING_MAX_LOD_CAP.to_variant()])
         .to::<bool>();
@@ -1056,33 +1031,6 @@ fn register_world2_project_settings() {
     settings.call(
         "set_as_basic",
         &[PROJECT_SETTING_MAX_LOD_CAP.to_variant(), true.to_variant()],
-    );
-
-    let has_debug_override_setting = settings
-        .call(
-            "has_setting",
-            &[PROJECT_SETTING_DEBUG_LOD_VIEWPORT_HEIGHT_OVERRIDE.to_variant()],
-        )
-        .to::<bool>();
-    if !has_debug_override_setting {
-        settings.set(
-            PROJECT_SETTING_DEBUG_LOD_VIEWPORT_HEIGHT_OVERRIDE,
-            &default_lod_viewport_height_override.to_variant(),
-        );
-    }
-
-    let mut debug_info = VarDictionary::new();
-    debug_info.set("name", PROJECT_SETTING_DEBUG_LOD_VIEWPORT_HEIGHT_OVERRIDE);
-    debug_info.set("type", VariantType::FLOAT);
-    debug_info.set("hint", PropertyHint::RANGE);
-    debug_info.set("hint_string", "0,16384,1,or_greater");
-    settings.call("add_property_info", &[debug_info.to_variant()]);
-    settings.call(
-        "set_initial_value",
-        &[
-            PROJECT_SETTING_DEBUG_LOD_VIEWPORT_HEIGHT_OVERRIDE.to_variant(),
-            default_lod_viewport_height_override.to_variant(),
-        ],
     );
 }
 

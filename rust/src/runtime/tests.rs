@@ -115,7 +115,6 @@ fn orbit_camera_state() -> CameraState {
         frustum_planes: huge_test_frustum(),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
     }
 }
@@ -127,7 +126,6 @@ fn near_surface_camera_state() -> CameraState {
         frustum_planes: huge_test_frustum(),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
     }
 }
@@ -702,7 +700,6 @@ fn phase1_selection_is_invariant_to_viewport_height_changes() {
         frustum_planes: huge_test_frustum(),
         projection_scale: 600.0,
         viewport_height_px: 600.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
     };
     let fullscreen_camera = CameraState {
@@ -711,7 +708,6 @@ fn phase1_selection_is_invariant_to_viewport_height_changes() {
         frustum_planes: small_camera.frustum_planes,
         projection_scale: 2_400.0,
         viewport_height_px: 2_400.0,
-        lod_reference_height_px_override: None,
         origin: small_camera.origin,
     };
 
@@ -749,7 +745,6 @@ fn phase1_best_first_refinement_prioritizes_the_highest_error_face_under_budget(
         frustum_planes: huge_test_frustum(),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
     };
     let mut frame_state = SelectionFrameState::default();
@@ -796,7 +791,6 @@ fn phase1_hard_render_chunk_cap_bounds_refinement_and_normalization() {
         frustum_planes: huge_test_frustum(),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
     };
     let mut frame_state = SelectionFrameState::default();
@@ -884,7 +878,6 @@ fn sparse_metadata_streaming_keeps_parent_coverage_until_children_arrive() {
         frustum_planes: box_test_frustum(Vector3::ZERO, 50_000.0),
         projection_scale: 40_000.0,
         viewport_height_px: 40_000.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, camera_position),
     };
     let mut frame_state = SelectionFrameState::default();
@@ -1557,7 +1550,6 @@ fn phase10_frustum_checks_use_render_relative_centers() {
         frustum_planes: box_test_frustum(Vector3::ZERO, 1_000.0),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&RuntimeConfig::default(), DVec3::ZERO),
     };
     let shifted = CameraState {
@@ -1566,7 +1558,6 @@ fn phase10_frustum_checks_use_render_relative_centers() {
         frustum_planes: box_test_frustum(Vector3::ZERO, 1_000.0),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(
             &RuntimeConfig::default(),
             DVec3::new(50_000.0, 0.0, 0.0),
@@ -1607,7 +1598,6 @@ fn frustum_culling_can_be_disabled_in_runtime_config() {
         frustum_planes: box_test_frustum(Vector3::ZERO, 100.0),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
     };
 
@@ -2269,7 +2259,6 @@ fn coarse_lod_fallback_keeps_root_chunk_when_face_is_fully_culled() {
         frustum_planes: box_test_frustum(Vector3::new(50_000.0, 50_000.0, 50_000.0), 100.0),
         projection_scale: 1_200.0,
         viewport_height_px: 1_200.0,
-        lod_reference_height_px_override: None,
         origin: OriginSnapshot::for_config(&runtime.config, DVec3::ZERO),
     };
     let mut frame_state = SelectionFrameState::default();

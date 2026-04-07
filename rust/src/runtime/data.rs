@@ -1336,7 +1336,6 @@ pub struct CameraState {
     pub frustum_planes: [Plane; 6],
     pub projection_scale: f64,
     pub viewport_height_px: f32,
-    pub lod_reference_height_px_override: Option<f32>,
     pub origin: OriginSnapshot,
 }
 
@@ -1346,7 +1345,6 @@ impl CameraState {
         frustum_planes: [Plane; 6],
         fov_y_degrees: f32,
         viewport_height_px: f32,
-        lod_reference_height_px_override: Option<f32>,
         origin: OriginSnapshot,
     ) -> Self {
         let position_planet = vector3_to_dvec3(transform.origin) + origin.render_origin_planet;
@@ -1362,15 +1360,8 @@ impl CameraState {
             frustum_planes,
             projection_scale,
             viewport_height_px,
-            lod_reference_height_px_override,
             origin,
         }
-    }
-
-    pub fn effective_lod_reference_height_px(&self, default_reference_height_px: f32) -> f32 {
-        self.lod_reference_height_px_override
-            .unwrap_or(default_reference_height_px)
-            .max(1.0)
     }
 }
 
