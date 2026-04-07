@@ -114,8 +114,10 @@ impl PlanetRuntime {
             return;
         }
 
-        let mut frame_state = SelectionFrameState::default();
-        frame_state.phase10_origin_rebases = 1;
+        let mut frame_state = SelectionFrameState {
+            phase10_origin_rebases: 1,
+            ..SelectionFrameState::default()
+        };
         self.rebind_active_relative_transforms(&mut frame_state);
         self.origin_shift_pending_rebind = false;
         self.frame_state.phase10_origin_rebases = self
@@ -1277,9 +1279,9 @@ impl PlanetRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn desired_keys_intersecting<'a>(
+    pub(crate) fn desired_keys_intersecting(
         key: ChunkKey,
-        desired: &'a HashSet<ChunkKey>,
+        desired: &HashSet<ChunkKey>,
     ) -> Vec<ChunkKey> {
         desired
             .iter()

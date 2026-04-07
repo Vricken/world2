@@ -99,3 +99,4 @@ Complex behavior should be traceable without requiring the entire game to run.
 * No hardcoded asset or scene paths outside approved config/content locations.
 * No duplicated logic when a shared system or utility is appropriate.
 * Every new feature should either extend an existing system cleanly or introduce a new focused module.
+* Rust code should stay `cargo fmt --all --check` clean and `cargo clippy --all-targets --all-features -- -D warnings` clean.

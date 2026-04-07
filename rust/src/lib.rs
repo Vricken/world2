@@ -311,18 +311,22 @@ impl PlanetRoot {
     }
 
     fn effective_runtime_config(&self) -> RuntimeConfig {
-        let mut config = RuntimeConfig::default();
-        config.planet_radius = self.planet_radius.max(1.0);
-        config.height_amplitude = self.terrain_height_amplitude.max(0.0);
-        config.max_lod_cap = Self::project_max_lod_cap();
-        config.metadata_precompute_max_lod = DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD;
-        config.dense_metadata_prebuild_max_lod = DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD;
-        config.enable_frustum_culling = self.frustum_culling_enabled;
-        config.keep_coarse_lod_chunks_rendered = self.keep_coarse_lod_chunks_rendered;
-        if self.debug_force_server_pool_render_backend {
-            config.render_backend = runtime::RenderBackendKind::ServerPool;
+        let default_config = RuntimeConfig::default();
+        RuntimeConfig {
+            planet_radius: self.planet_radius.max(1.0),
+            height_amplitude: self.terrain_height_amplitude.max(0.0),
+            max_lod_cap: Self::project_max_lod_cap(),
+            metadata_precompute_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+            dense_metadata_prebuild_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
+            enable_frustum_culling: self.frustum_culling_enabled,
+            keep_coarse_lod_chunks_rendered: self.keep_coarse_lod_chunks_rendered,
+            render_backend: if self.debug_force_server_pool_render_backend {
+                runtime::RenderBackendKind::ServerPool
+            } else {
+                default_config.render_backend
+            },
+            ..default_config
         }
-        config
     }
 
     fn effective_atmosphere_height(&self) -> f64 {
@@ -368,13 +372,14 @@ impl PlanetRoot {
         let radius = self.planet_radius.max(1.0);
         let height = self.effective_atmosphere_height();
         let light_transform = self.first_directional_light_transform();
+        let atmosphere_node_name = StringName::from(ATMOSPHERE_NODE_NAME);
         let child_count = self.base().get_child_count();
 
         for child_index in 0..child_count {
             let Some(mut child) = self.base().get_child(child_index) else {
                 continue;
             };
-            if child.get_name().to_string() != ATMOSPHERE_NODE_NAME {
+            if child.get_name() != atmosphere_node_name {
                 continue;
             }
 
@@ -496,12 +501,13 @@ impl PlanetRoot {
     }
 
     fn find_editor_preview_node(&self) -> Option<Gd<MeshInstance3D>> {
+        let preview_node_name = StringName::from(EDITOR_PREVIEW_NODE_NAME);
         let child_count = self.base().get_child_count();
         for child_index in 0..child_count {
             let Some(child) = self.base().get_child(child_index) else {
                 continue;
             };
-            if child.get_name().to_string() != EDITOR_PREVIEW_NODE_NAME {
+            if child.get_name() != preview_node_name {
                 continue;
             }
             if let Ok(preview) = child.try_cast::<MeshInstance3D>() {
@@ -512,6 +518,7 @@ impl PlanetRoot {
     }
 
     fn prune_editor_preview_nodes(&mut self) -> Option<Gd<MeshInstance3D>> {
+        let preview_node_name = StringName::from(EDITOR_PREVIEW_NODE_NAME);
         let child_count = self.base().get_child_count();
         let mut kept_preview = None;
         let mut duplicate_children = Vec::new();
@@ -520,7 +527,7 @@ impl PlanetRoot {
             let Some(child) = self.base().get_child(child_index) else {
                 continue;
             };
-            if child.get_name().to_string() != EDITOR_PREVIEW_NODE_NAME {
+            if child.get_name() != preview_node_name {
                 continue;
             }
 
@@ -542,6 +549,7 @@ impl PlanetRoot {
 
     fn remove_runtime_preview_node(&mut self) {
         self.editor_preview = None;
+        let preview_node_name = StringName::from(EDITOR_PREVIEW_NODE_NAME);
         let child_count = self.base().get_child_count();
         let mut to_remove = Vec::new();
 
@@ -549,7 +557,7 @@ impl PlanetRoot {
             let Some(child) = self.base().get_child(child_index) else {
                 continue;
             };
-            if child.get_name().to_string() == EDITOR_PREVIEW_NODE_NAME {
+            if child.get_name() == preview_node_name {
                 to_remove.push(child);
             }
         }
@@ -1019,7 +1027,7 @@ fn register_world2_project_settings() {
     info.set("name", PROJECT_SETTING_MAX_LOD_CAP);
     info.set("type", VariantType::INT);
     info.set("hint", PropertyHint::RANGE);
-    info.set("hint_string", format!("0,{},1", MAX_SUPPORTED_MAX_LOD));
+    info.set("hint_string", format!("0,{MAX_SUPPORTED_MAX_LOD},1"));
     settings.call("add_property_info", &[info.to_variant()]);
     settings.call(
         "set_initial_value",

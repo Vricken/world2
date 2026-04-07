@@ -886,7 +886,7 @@ fn sparse_metadata_streaming_keeps_parent_coverage_until_children_arrive() {
         .select_render_set(&camera, &mut frame_state)
         .unwrap();
 
-    assert!(runtime.pending_meta_requests.len() > 0);
+    assert!(!runtime.pending_meta_requests.is_empty());
     assert!(initial.iter().all(|key| key.lod <= 8));
     assert!(initial.iter().any(|key| key.lod == 8));
 

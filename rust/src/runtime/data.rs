@@ -325,8 +325,8 @@ impl StoredChunkMeta {
         }
     }
 
-    pub(crate) fn to_chunk_meta(
-        &self,
+    pub(crate) fn into_chunk_meta(
+        self,
         key: ChunkKey,
         surface_class: SurfaceClassKey,
     ) -> Result<ChunkMeta, TopologyError> {
@@ -367,6 +367,10 @@ impl MetadataStore {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn dense_max_lod(&self) -> u8 {
         self.dense_max_lod
     }
@@ -405,7 +409,7 @@ impl MetadataStore {
         surface_class: SurfaceClassKey,
     ) -> Result<Option<ChunkMeta>, TopologyError> {
         self.get_stored(&key)
-            .map(|stored| stored.to_chunk_meta(key, surface_class))
+            .map(|stored| stored.into_chunk_meta(key, surface_class))
             .transpose()
     }
 
@@ -430,7 +434,7 @@ impl MetadataStore {
 
             let previous = face_slots[slot_index]
                 .replace(StoredChunkMeta::from_chunk_meta(&meta))
-                .map(|stored| stored.to_chunk_meta(meta.key, meta.surface_class.clone()))
+                .map(|stored| stored.into_chunk_meta(meta.key, meta.surface_class.clone()))
                 .transpose()?;
             if previous.is_none() {
                 self.len += 1;
@@ -440,7 +444,7 @@ impl MetadataStore {
             let previous = self
                 .sparse_levels
                 .insert(meta.key, StoredChunkMeta::from_chunk_meta(&meta))
-                .map(|stored| stored.to_chunk_meta(meta.key, meta.surface_class.clone()))
+                .map(|stored| stored.into_chunk_meta(meta.key, meta.surface_class.clone()))
                 .transpose()?;
             if previous.is_none() {
                 self.len += 1;
@@ -594,6 +598,10 @@ impl ChunkSampleGrid {
 
     pub fn len(&self) -> usize {
         self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
     }
 
     pub fn get(&self, x: u32, y: u32) -> &ChunkSample {

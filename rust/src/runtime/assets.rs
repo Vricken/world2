@@ -342,7 +342,7 @@ pub fn asset_group_local_bounds(
         );
     }
 
-    (min.x.is_finite() && min.y.is_finite() && min.z.is_finite()).then(|| AssetGroupLocalBounds {
+    (min.x.is_finite() && min.y.is_finite() && min.z.is_finite()).then_some(AssetGroupLocalBounds {
         min: [min.x, min.y, min.z],
         size: [max.x - min.x, max.y - min.y, max.z - min.z],
     })

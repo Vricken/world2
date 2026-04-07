@@ -77,7 +77,7 @@ pub(crate) fn copy_f32_slice_to_packed_bytes(bytes: &mut PackedByteArray, values
 }
 
 pub(crate) fn copy_f32x4_slice_to_packed_bytes(bytes: &mut PackedByteArray, values: &[[f32; 4]]) {
-    let byte_len = values.len() * std::mem::size_of::<[f32; 4]>();
+    let byte_len = std::mem::size_of_val(values);
     if bytes.len() != byte_len {
         bytes.resize(byte_len);
     }

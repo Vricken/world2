@@ -1045,10 +1045,8 @@ impl PlanetRuntime {
                 &surface_class,
             );
             self.install_render_entry(key, mesh_rid, render_instance_rid, surface_class, staging);
-        } else {
-            if let Some(previous_entry) = self.take_current_render_entry(key) {
-                self.recycle_render_entry(previous_entry);
-            }
+        } else if let Some(previous_entry) = self.take_current_render_entry(key) {
+            self.recycle_render_entry(previous_entry);
         }
 
         frame_state.phase8_render_cold_commits += 1;
@@ -1330,19 +1328,13 @@ impl PlanetRuntime {
             .height_texture
             .take()
             .unwrap_or_else(ImageTexture::new_gd);
-        let height_bytes = entry
-            .height_bytes
-            .take()
-            .unwrap_or_else(PackedByteArray::new);
+        let height_bytes = entry.height_bytes.take().unwrap_or_default();
         let material_image = entry.material_image.take().unwrap_or_else(Image::new_gd);
         let material_texture = entry
             .material_texture
             .take()
             .unwrap_or_else(ImageTexture::new_gd);
-        let material_bytes = entry
-            .material_bytes
-            .take()
-            .unwrap_or_else(PackedByteArray::new);
+        let material_bytes = entry.material_bytes.take().unwrap_or_default();
         let mut shader_material = entry
             .shader_material
             .take()
