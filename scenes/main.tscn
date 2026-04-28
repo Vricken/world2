@@ -63,13 +63,13 @@ shader_parameter/direction_profile_main_colors = SubResource("GradientTexture1D_
 shader_parameter/direction_profile_back_colors = SubResource("GradientTexture1D_f8q4h")
 shader_parameter/water_depth_profile_colors = SubResource("GradientTexture1D_tfj6s")
 shader_parameter/sea_level = 100000.0
-shader_parameter/atmosphere_radius = 100000.2
+shader_parameter/atmosphere_radius = 120000.0
 shader_parameter/atmosphere_density = 0.12
 shader_parameter/water_density_factor = 0.0
 
 [sub_resource type="BoxMesh" id="BoxMesh_tbgi4"]
 flip_faces = true
-size = Vector3(210000.42, 210000.42, 210000.42)
+size = Vector3(251999.98, 251999.98, 251999.98)
 
 [sub_resource type="Environment" id="Environment_0wfyh"]
 background_mode = 1
@@ -88,16 +88,13 @@ height = 200000.0
 
 [node name="PlanetRoot" type="PlanetRoot" unique_id=1423041356]
 planet_radius = 100000.0
-atmosphere_height = 0.2
-atmosphere_height_follows_terrain_scale = false
-debug_force_server_pool_render_backend = false
 
 [node name="PlanetAtmosphere" parent="." unique_id=1899854573 instance=ExtResource("2_vb2wq")]
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
 material_override = SubResource("ShaderMaterial_jyhfs")
 mesh = SubResource("BoxMesh_tbgi4")
 planet_radius = 100000.0
-atmosphere_height = 0.2
+atmosphere_height = 20000.0
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=5108196]
 environment = SubResource("Environment_0wfyh")
