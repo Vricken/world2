@@ -23,9 +23,12 @@ impl PlanetRoot {
             frustum_culling_enabled: runtime.config.enable_frustum_culling,
             keep_coarse_lod_chunks_rendered: runtime.config.keep_coarse_lod_chunks_rendered,
             debug_force_server_pool_render_backend: false,
+            debug_show_runtime_hud: true,
+            debug_origin_rebase_count: 0,
+            runtime_debug_canvas: None,
+            runtime_debug_label: None,
             runtime,
             runtime_tick_count: 0,
-            runtime_camera_clip_bootstrapped: false,
             editor_preview_radius_applied: -1.0,
             editor_preview: None,
         }
@@ -44,6 +47,7 @@ impl PlanetRoot {
         self.sync_atmosphere_settings();
         self.base_mut().set_process(true);
         self.base_mut().set_physics_process(true);
+        self.ensure_runtime_debug_hud();
         self.sync_runtime_scale_bootstrap();
         self.cache_world_rids();
         self.rebuild_runtime();
@@ -101,6 +105,7 @@ impl PlanetRoot {
             self.base_mut().set_physics_process(false);
             return;
         }
+        self.teardown_runtime_debug_hud();
         self.runtime.release_server_resources();
         self.base_mut().set_process(false);
         self.base_mut().set_physics_process(false);
@@ -120,6 +125,9 @@ impl PlanetRoot {
             self.cache_world_rids();
         }
 
+        self.sync_runtime_camera_clip();
+        self.update_runtime_debug_hud();
+
         let Some(camera_state) = self.acquire_camera_state() else {
             if self.runtime_tick_count == 1 {
                 godot_warn!(
@@ -129,7 +137,6 @@ impl PlanetRoot {
             }
             return;
         };
-        self.sync_runtime_camera_clip_bootstrap();
 
         if let Err(err) = self.runtime.step_visibility_selection(&camera_state) {
             godot_error!(

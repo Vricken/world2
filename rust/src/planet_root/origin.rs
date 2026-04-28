@@ -17,6 +17,7 @@ impl PlanetRoot {
             .runtime
             .update_origin_from_camera(camera_position_planet)
         {
+            self.debug_origin_rebase_count = self.debug_origin_rebase_count.saturating_add(1);
             self.apply_runtime_origin_shift();
             self.runtime.flush_pending_origin_rebinds();
         }

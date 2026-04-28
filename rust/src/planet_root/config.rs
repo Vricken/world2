@@ -14,7 +14,6 @@ impl PlanetRoot {
             self.cached_physics_space_rid.unwrap_or(Rid::Invalid),
         );
         self.runtime_tick_count = 0;
-        self.runtime_camera_clip_bootstrapped = false;
     }
 
     pub(crate) fn effective_runtime_config(&self) -> RuntimeConfig {
@@ -75,22 +74,28 @@ impl PlanetRoot {
         }
     }
 
-    pub(crate) fn sync_runtime_camera_clip_bootstrap(&mut self) {
-        if self.runtime_camera_clip_bootstrapped {
-            return;
-        }
-
+    pub(crate) fn sync_runtime_camera_clip(&mut self) {
         let Some(mut camera) = self.active_camera_3d() else {
             return;
         };
 
-        // Keep the far plane close to the actual startup view volume so large
-        // worlds do not pay unnecessary precision loss on the first frame.
-        let target_far = self.runtime_camera_far_clip() as f32;
-        if camera.get_far() < target_far {
-            camera.set_far(target_far);
+        let camera_distance = self
+            .runtime
+            .camera_planet_position_from_render(camera.get_camera_transform().origin)
+            .length();
+        let target_far = self.runtime_camera_far_clip_for_distance(camera_distance);
+        let target_near = runtime_camera_near_clip_for_far_clip(target_far);
+        let current_far = f64::from(camera.get_far());
+        let current_near = f64::from(camera.get_near());
+
+        if current_far + 1.0 < target_far
+            || current_far > target_far * DEFAULT_DEBUG_CAMERA_FAR_CLIP_SHRINK_RATIO
+        {
+            camera.set_far(target_far as f32);
         }
-        self.runtime_camera_clip_bootstrapped = true;
+        if (current_near - target_near).abs() > 0.01 {
+            camera.set_near(target_near as f32);
+        }
     }
 
     pub(crate) fn runtime_player_spawn_distance(&self) -> f64 {
@@ -102,14 +107,69 @@ impl PlanetRoot {
         radius + atmosphere_height + safety_margin
     }
 
-    pub(crate) fn runtime_camera_far_clip(&self) -> f64 {
+    pub(crate) fn runtime_camera_far_clip_for_distance(&self, camera_distance: f64) -> f64 {
         let radius = self.planet_radius.max(1.0);
         let atmosphere_height = self.effective_atmosphere_height();
-        (self.runtime_player_spawn_distance() + radius + atmosphere_height)
-            .max(DEFAULT_DEBUG_CAMERA_FAR_CLIP_MIN)
+        dynamic_runtime_camera_far_clip(radius, atmosphere_height, camera_distance)
     }
 
     pub(crate) fn runtime_min_average_chunk_surface_span_meters_value(&self) -> f64 {
         DEFAULT_MIN_AVERAGE_CHUNK_SURFACE_SPAN_METERS
+    }
+}
+
+pub(crate) fn dynamic_runtime_camera_far_clip(
+    planet_radius: f64,
+    atmosphere_height: f64,
+    camera_distance: f64,
+) -> f64 {
+    let outer_radius = planet_radius.max(1.0) + atmosphere_height.max(0.0);
+    let proxy_bounding_radius =
+        outer_radius * (DEFAULT_ATMOSPHERE_PROXY_BOX_SIZE_SCALE * 0.5) * 3.0_f64.sqrt();
+    ((camera_distance.max(0.0) + proxy_bounding_radius)
+        * DEFAULT_DEBUG_CAMERA_FAR_CLIP_MARGIN_SCALE)
+        .max(DEFAULT_DEBUG_CAMERA_FAR_CLIP_MIN)
+}
+
+pub(crate) fn runtime_camera_near_clip_for_far_clip(far_clip: f64) -> f64 {
+    (far_clip / DEFAULT_DEBUG_CAMERA_MAX_FAR_NEAR_RATIO).clamp(
+        DEFAULT_DEBUG_CAMERA_NEAR_CLIP_MIN,
+        DEFAULT_DEBUG_CAMERA_NEAR_CLIP_MAX,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_far_clip_covers_atmosphere_proxy_cube_from_orbit() {
+        let planet_radius = 100_000.0;
+        let atmosphere_height = 20_000.0;
+        let camera_distance = 500_000.0;
+        let target_far =
+            dynamic_runtime_camera_far_clip(planet_radius, atmosphere_height, camera_distance);
+        let outer_radius = planet_radius + atmosphere_height;
+        let proxy_bounding_radius =
+            outer_radius * (DEFAULT_ATMOSPHERE_PROXY_BOX_SIZE_SCALE * 0.5) * 3.0_f64.sqrt();
+
+        assert!(target_far > camera_distance + proxy_bounding_radius);
+    }
+
+    #[test]
+    fn dynamic_far_clip_keeps_small_world_minimum() {
+        assert_eq!(
+            dynamic_runtime_camera_far_clip(1_000.0, 200.0, 1_225.0),
+            DEFAULT_DEBUG_CAMERA_FAR_CLIP_MIN
+        );
+    }
+
+    #[test]
+    fn dynamic_near_clip_bounds_far_near_ratio() {
+        let far_clip = 422_176.188;
+        let near_clip = runtime_camera_near_clip_for_far_clip(far_clip);
+
+        assert!(near_clip > 2.0);
+        assert!(far_clip / near_clip <= DEFAULT_DEBUG_CAMERA_MAX_FAR_NEAR_RATIO + 1.0e-6);
     }
 }

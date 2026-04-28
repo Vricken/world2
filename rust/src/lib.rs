@@ -5,7 +5,7 @@ pub mod runtime;
 pub mod topology;
 
 use godot::builtin::{VarDictionary, VariantType};
-use godot::classes::{INode3D, MeshInstance3D, Node3D};
+use godot::classes::{CanvasLayer, INode3D, Label, MeshInstance3D, Node3D};
 use godot::init::InitStage;
 use godot::prelude::*;
 use godot::register::info::PropertyHint;
@@ -21,9 +21,17 @@ const EDITOR_PREVIEW_NODE_NAME: &str = "__World2EditorPreview";
 const ATMOSPHERE_NODE_NAME: &str = "PlanetAtmosphere";
 const ATMOSPHERE_PLANET_RADIUS_PROPERTY: &str = "planet_radius";
 const ATMOSPHERE_HEIGHT_PROPERTY: &str = "atmosphere_height";
+const RUNTIME_DEBUG_HUD_NODE_NAME: &str = "__World2RuntimeDebugHud";
+const RUNTIME_DEBUG_LABEL_NODE_NAME: &str = "__World2RuntimeDebugLabel";
 const DEFAULT_DEBUG_PLAYER_SPAWN_MARGIN: f64 = 500.0;
 const DEFAULT_DEBUG_PLAYER_SPAWN_MARGIN_RADIUS_SCALE: f64 = 0.02;
 const DEFAULT_DEBUG_CAMERA_FAR_CLIP_MIN: f64 = 100_000.0;
+const DEFAULT_ATMOSPHERE_PROXY_BOX_SIZE_SCALE: f64 = 2.1;
+const DEFAULT_DEBUG_CAMERA_FAR_CLIP_MARGIN_SCALE: f64 = 1.01;
+const DEFAULT_DEBUG_CAMERA_FAR_CLIP_SHRINK_RATIO: f64 = 1.25;
+const DEFAULT_DEBUG_CAMERA_NEAR_CLIP_MIN: f64 = 0.5;
+const DEFAULT_DEBUG_CAMERA_NEAR_CLIP_MAX: f64 = 50.0;
+const DEFAULT_DEBUG_CAMERA_MAX_FAR_NEAR_RATIO: f64 = 200_000.0;
 
 #[derive(GodotClass)]
 #[class(tool, base = Node3D)]
@@ -33,7 +41,6 @@ pub struct PlanetRoot {
     cached_physics_space_rid: Option<Rid>,
     runtime: PlanetRuntime,
     runtime_tick_count: u64,
-    runtime_camera_clip_bootstrapped: bool,
     #[export]
     planet_radius: f64,
     #[export]
@@ -46,6 +53,11 @@ pub struct PlanetRoot {
     keep_coarse_lod_chunks_rendered: bool,
     #[export]
     debug_force_server_pool_render_backend: bool,
+    #[export]
+    debug_show_runtime_hud: bool,
+    debug_origin_rebase_count: u64,
+    runtime_debug_canvas: Option<Gd<CanvasLayer>>,
+    runtime_debug_label: Option<Gd<Label>>,
     editor_preview_radius_applied: f64,
     editor_preview: Option<Gd<MeshInstance3D>>,
 }
