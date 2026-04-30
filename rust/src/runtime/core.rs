@@ -35,6 +35,7 @@ impl PlanetRuntime {
             gpu_active_materials: HashMap::new(),
             gpu_render_instance_pool: VecDeque::new(),
             terrain_shader: None,
+            water_render: WaterRenderState::default(),
             physics_pool: VecDeque::new(),
             asset_groups: HashMap::new(),
             asset_family_meshes: HashMap::new(),

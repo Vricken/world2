@@ -26,8 +26,13 @@ pub struct TerrainFieldSettings {
     pub planet_radius: f64,
     pub height_amplitude: f64,
     pub base_frequency: f64,
+    pub hill_frequency: f64,
+    pub hill_strength: f64,
+    pub mountain_frequency: f64,
+    pub mountain_strength: f64,
     pub detail_frequency: f64,
     pub detail_weight: f64,
+    pub sea_level_meters: f64,
 }
 
 impl Default for TerrainFieldSettings {
@@ -35,21 +40,102 @@ impl Default for TerrainFieldSettings {
         Self {
             planet_radius: 1_000.0,
             height_amplitude: 120.0,
-            base_frequency: 0.006,
-            detail_frequency: 0.021,
-            detail_weight: 0.28,
+            base_frequency: 2.1,
+            hill_frequency: 10.5,
+            hill_strength: 0.22,
+            mountain_frequency: 27.0,
+            mountain_strength: 0.32,
+            detail_frequency: 58.0,
+            detail_weight: 0.035,
+            sea_level_meters: 0.0,
         }
     }
 }
 
-impl TerrainFieldSettings {
-    pub fn sample_height(&self, unit_dir: DVec3) -> f64 {
-        let planet_space = unit_dir * self.planet_radius;
-        let primary = harmonic_signal(planet_space * self.base_frequency);
-        let detail = ridge_signal(planet_space * self.detail_frequency);
-        let signal = (0.78 * primary + self.detail_weight * detail).clamp(-1.0, 1.0);
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainFieldSample {
+    pub height: f64,
+    pub height_norm: f32,
+    pub moisture: f32,
+    pub land_mask: f32,
+}
 
-        signal * self.height_amplitude
+impl TerrainFieldSettings {
+    pub fn sample(&self, unit_dir: DVec3) -> TerrainFieldSample {
+        let height_amplitude = self.height_amplitude.max(0.0);
+        let continent_raw = fbm_value(
+            unit_dir * self.base_frequency + DVec3::new(11.3, -7.1, 19.7),
+            5,
+            0.53,
+            2.03,
+        );
+        let continent_mask = smoothstep(-0.18, 0.22, continent_raw);
+        let continent_height = lerp(-0.50, 0.24, continent_mask) + continent_raw * 0.10;
+
+        let hills = fbm_value(
+            unit_dir * self.hill_frequency + DVec3::new(-31.9, 4.7, 8.2),
+            4,
+            0.48,
+            2.01,
+        ) * self.hill_strength
+            * 0.26
+            * continent_mask;
+
+        let mountain_area = smoothstep(
+            0.10,
+            0.55,
+            fbm_value(
+                unit_dir * (self.base_frequency * 2.4) + DVec3::new(5.4, 37.0, -12.8),
+                4,
+                0.52,
+                2.0,
+            ),
+        ) * smoothstep(0.08, 0.36, continent_raw);
+        let ridge_source = fbm_value(
+            unit_dir * self.mountain_frequency + DVec3::new(73.2, -16.0, 41.5),
+            4,
+            0.50,
+            2.02,
+        );
+        let ridge = smoothstep(0.50, 0.86, 1.0 - ridge_source.abs()).powf(1.35);
+        let mountains = mountain_area * ridge * self.mountain_strength * 0.56;
+
+        let detail = fbm_value(
+            unit_dir * self.detail_frequency + DVec3::new(-3.0, 91.0, 25.0),
+            3,
+            0.42,
+            2.0,
+        ) * self.detail_weight
+            * continent_mask;
+        let signal = (continent_height + hills + mountains + detail).clamp(-1.0, 1.0);
+        let height = signal * height_amplitude;
+        let height_norm = if height_amplitude <= f64::EPSILON {
+            0.5
+        } else {
+            ((height / height_amplitude) * 0.5 + 0.5).clamp(0.0, 1.0)
+        } as f32;
+        let moisture_base = value_noise3(unit_dir * 5.0 + DVec3::new(6.0, -14.0, 28.0)) * 0.5 + 0.5;
+        let moisture = (moisture_base * (1.0 - 0.25 * mountain_area)).clamp(0.0, 1.0) as f32;
+        let land_mask = self.land_mask_for_height(height);
+
+        TerrainFieldSample {
+            height,
+            height_norm,
+            moisture,
+            land_mask,
+        }
+    }
+
+    pub fn sample_height(&self, unit_dir: DVec3) -> f64 {
+        self.sample(unit_dir).height
+    }
+
+    pub fn land_mask_for_height(&self, height: f64) -> f32 {
+        smoothstep_f32(
+            self.sea_level_meters as f32,
+            (self.sea_level_meters + self.height_amplitude.max(1.0) * 0.02) as f32,
+            height as f32,
+        )
     }
 }
 
@@ -197,16 +283,90 @@ impl CubeProjection {
     }
 }
 
-fn harmonic_signal(p: DVec3) -> f64 {
-    let octave_0 = (p.dot(DVec3::new(0.971, 1.113, 1.357))).sin();
-    let octave_1 = (p.dot(DVec3::new(-1.947, 0.613, 1.731))).sin();
-    let octave_2 = ((p.x * 0.37).cos() + (p.y * 0.53).sin() + (p.z * 0.79).cos()) / 3.0;
-
-    (0.52 * octave_0 + 0.33 * octave_1 + 0.15 * octave_2).clamp(-1.0, 1.0)
+fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
+    let t = ((value - edge0) / (edge1 - edge0).max(f64::EPSILON)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
-fn ridge_signal(p: DVec3) -> f64 {
-    1.0 - 2.0 * harmonic_signal(p).abs()
+fn smootherstep(value: f64) -> f64 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+fn fbm_value(mut p: DVec3, octaves: u32, persistence: f64, lacunarity: f64) -> f64 {
+    let mut amplitude = 1.0;
+    let mut sum = 0.0;
+    let mut norm = 0.0;
+
+    for _ in 0..octaves.max(1) {
+        sum += value_noise3(p) * amplitude;
+        norm += amplitude;
+        amplitude *= persistence;
+        p *= lacunarity;
+    }
+
+    if norm <= f64::EPSILON {
+        0.0
+    } else {
+        (sum / norm).clamp(-1.0, 1.0)
+    }
+}
+
+fn value_noise3(p: DVec3) -> f64 {
+    let cell = p.floor();
+    let frac = p - cell;
+    let sx = smootherstep(frac.x);
+    let sy = smootherstep(frac.y);
+    let sz = smootherstep(frac.z);
+    let ix = cell.x as i32;
+    let iy = cell.y as i32;
+    let iz = cell.z as i32;
+
+    let x00 = lerp(hash_lattice(ix, iy, iz), hash_lattice(ix + 1, iy, iz), sx);
+    let x10 = lerp(
+        hash_lattice(ix, iy + 1, iz),
+        hash_lattice(ix + 1, iy + 1, iz),
+        sx,
+    );
+    let x01 = lerp(
+        hash_lattice(ix, iy, iz + 1),
+        hash_lattice(ix + 1, iy, iz + 1),
+        sx,
+    );
+    let x11 = lerp(
+        hash_lattice(ix, iy + 1, iz + 1),
+        hash_lattice(ix + 1, iy + 1, iz + 1),
+        sx,
+    );
+    let y0 = lerp(x00, x10, sy);
+    let y1 = lerp(x01, x11, sy);
+    lerp(y0, y1, sz)
+}
+
+fn hash_lattice(x: i32, y: i32, z: i32) -> f64 {
+    let mut value = x as u64;
+    value ^= (y as u64).rotate_left(21);
+    value ^= (z as u64).rotate_left(42);
+    value = splitmix64(value);
+    let normalized = ((value >> 11) as f64) * (1.0 / ((1_u64 << 53) as f64));
+    normalized * 2.0 - 1.0
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = value;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn smoothstep_f32(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn normalize_direction(direction: DVec3) -> DVec3 {

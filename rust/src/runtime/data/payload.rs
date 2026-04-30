@@ -24,8 +24,9 @@ impl CpuMeshBuffers {
 pub struct ChunkSample {
     pub unit_dir: DVec3,
     pub height: f32,
-    pub biome0: f32,
-    pub biome1: f32,
+    pub height_norm: f32,
+    pub moisture: f32,
+    pub land_mask: f32,
     pub slope_hint: f32,
 }
 
@@ -105,7 +106,14 @@ impl ChunkRenderTilePayload {
             .collect::<Vec<_>>();
         let material_tile = samples
             .iter()
-            .map(|sample| [sample.biome0, sample.biome1, sample.slope_hint, 1.0])
+            .map(|sample| {
+                [
+                    sample.height_norm,
+                    sample.slope_hint,
+                    sample.moisture,
+                    sample.land_mask,
+                ]
+            })
             .collect::<Vec<_>>();
 
         Self {

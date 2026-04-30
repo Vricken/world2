@@ -26,5 +26,5 @@ pub use render::{
     CanonicalRenderMeshEntry, ChunkRidState, CollisionResidencySnapshot, GpuMaterialPoolEntry,
     PhysicsPoolEntry, RenderFallbackReason, RenderPoolEntry, RenderResidencyEntry,
     RenderTileHandle, RenderTilePoolSnapshot, RenderTilePoolState, RenderTileSlotEntry,
-    RenderWarmPath, SeamDebugSnapshot,
+    RenderWarmPath, SeamDebugSnapshot, WaterRenderState,
 };

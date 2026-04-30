@@ -9,8 +9,8 @@ pub const DEFAULT_ASSET_MASK_TEXTURE_NOTE: &str = "procedural_mask_signal";
 pub struct AssetFamilyDefinition {
     pub family_id: u16,
     pub spawn_chance: f32,
-    pub min_biome0: f32,
-    pub min_biome1: f32,
+    pub min_moisture: f32,
+    pub min_height_norm: f32,
     pub max_slope_hint: f32,
     pub min_altitude_norm: f32,
     pub max_altitude_norm: f32,
@@ -33,8 +33,8 @@ pub const ASSET_FAMILY_DEFINITIONS: [AssetFamilyDefinition; 2] = [
     AssetFamilyDefinition {
         family_id: 0,
         spawn_chance: 0.34,
-        min_biome0: 0.38,
-        min_biome1: 0.28,
+        min_moisture: 0.38,
+        min_height_norm: 0.52,
         max_slope_hint: 0.16,
         min_altitude_norm: 0.28,
         max_altitude_norm: 0.74,
@@ -49,8 +49,8 @@ pub const ASSET_FAMILY_DEFINITIONS: [AssetFamilyDefinition; 2] = [
     AssetFamilyDefinition {
         family_id: 1,
         spawn_chance: 0.18,
-        min_biome0: 0.18,
-        min_biome1: 0.34,
+        min_moisture: 0.18,
+        min_height_norm: 0.58,
         max_slope_hint: 0.28,
         min_altitude_norm: 0.45,
         max_altitude_norm: 0.92,
@@ -116,8 +116,9 @@ pub struct AssetDebugSnapshot {
 struct AssetSiteSample {
     displaced_point: DVec3,
     normal: DVec3,
-    biome0: f32,
-    biome1: f32,
+    moisture: f32,
+    height_norm: f32,
+    land_mask: f32,
     slope_hint: f32,
     curvature_hint: f32,
     altitude_norm: f32,
@@ -128,7 +129,7 @@ pub fn build_chunk_asset_placement(config: &RuntimeConfig, key: ChunkKey) -> Chu
     let cells_per_axis = config.asset_placement_cells_per_axis.max(1);
     let cell_extent = 1.0 / f64::from(cells_per_axis);
     let mut placement = ChunkAssetPlacement::default();
-    let terrain = terrain_settings(config);
+    let terrain = config.terrain_settings();
 
     for family in ASSET_FAMILY_DEFINITIONS {
         for cell_y in 0..cells_per_axis {
@@ -150,8 +151,10 @@ pub fn build_chunk_asset_placement(config: &RuntimeConfig, key: ChunkKey) -> Chu
                     continue;
                 };
 
-                let accepted = site.biome0 >= family.min_biome0
-                    && site.biome1 >= family.min_biome1
+                let accepted = site.land_mask >= 1.0
+                    && center_is_above_asset_shoreline(config, site.displaced_point.length())
+                    && site.moisture >= family.min_moisture
+                    && site.height_norm >= family.min_height_norm
                     && site.slope_hint <= family.max_slope_hint
                     && site.altitude_norm >= family.min_altitude_norm
                     && site.altitude_norm <= family.max_altitude_norm
@@ -348,14 +351,6 @@ pub fn asset_group_local_bounds(
     })
 }
 
-fn terrain_settings(config: &RuntimeConfig) -> TerrainFieldSettings {
-    TerrainFieldSettings {
-        planet_radius: config.planet_radius,
-        height_amplitude: config.height_amplitude,
-        ..TerrainFieldSettings::default()
-    }
-}
-
 fn sample_asset_site(
     config: &RuntimeConfig,
     key: ChunkKey,
@@ -399,21 +394,17 @@ fn sample_asset_site(
     let curvature =
         (left.height + right.height + down.height + up.height - 4.0 * center.height).abs();
     let curvature_hint = (curvature / (amplitude * 4.0)).clamp(0.0, 1.0) as f32;
-    let altitude_norm = (((center.height / amplitude) * 0.5 + 0.5).clamp(0.0, 1.0)) as f32;
-    let temperature = (1.0 - center.unit_dir.y.abs()) as f32;
-    let moisture_signal =
-        (center.unit_dir.dot(DVec3::new(1.731, -0.613, 0.947)).sin() * 0.5 + 0.5) as f32;
-    let biome0 = moisture_signal.clamp(0.0, 1.0);
-    let biome1 = ((temperature * 0.75) + ((((center.height / amplitude) * 0.25) + 0.25) as f32))
-        .clamp(0.0, 1.0);
+    let terrain_sample = terrain.sample(center.unit_dir);
+    let altitude_norm = terrain_sample.height_norm;
     let mask_value =
         ((center.unit_dir.dot(DVec3::new(-0.914, 0.382, 1.271)) * 1.7).sin() * 0.5 + 0.5) as f32;
 
     Some(AssetSiteSample {
         displaced_point: center.displaced_point,
         normal,
-        biome0,
-        biome1,
+        moisture: terrain_sample.moisture,
+        height_norm: terrain_sample.height_norm,
+        land_mask: terrain_sample.land_mask,
         slope_hint,
         curvature_hint,
         altitude_norm,
@@ -434,7 +425,8 @@ fn sample_surface_point(
         .project(normalize_to_cube_surface(cube_point));
     let planet_point = unit_dir * terrain.planet_radius;
     let height = terrain
-        .sample_height(unit_dir)
+        .sample(unit_dir)
+        .height
         .clamp(-terrain.height_amplitude, terrain.height_amplitude);
     let displaced_point = unit_dir * (terrain.planet_radius + height);
 
@@ -448,6 +440,11 @@ fn sample_surface_point(
         height,
         displaced_point,
     })
+}
+
+fn center_is_above_asset_shoreline(config: &RuntimeConfig, radial_distance: f64) -> bool {
+    let shoreline_margin = config.height_amplitude.max(1.0) * 0.02;
+    radial_distance >= config.planet_radius + config.sea_level_meters + shoreline_margin
 }
 
 fn respects_exclusion_radius(

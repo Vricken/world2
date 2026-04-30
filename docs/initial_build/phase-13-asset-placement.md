@@ -25,7 +25,8 @@ What shipped:
 - Budgeted diff application already defers render and physics work when total commit count, upload bytes, or per-kind caps are exceeded, now precomputes deactivation coverage blockers instead of rescanning the desired sets per op, and keeps starvation counters visible in `SelectionFrameState` and `PlanetRoot` logs.
 - Render and physics pool reuse remain bounded, with the default physics pool watermark tightened to `4` so collision pooling stays more conservative than the render per-class watermark of `8`.
 - Worker-thread startup remains clamped to a small bounded count, and Phase 13 regression coverage now checks that the documented starting values and worker-count alignment stay explicit in code.
-- `PlanetRoot` now exposes `planet_radius`, `terrain_height_amplitude`, `atmosphere_height` as a planet-radius fraction, `frustum_culling_enabled`, and `keep_coarse_lod_chunks_rendered` in the inspector, keeps the `PlanetAtmosphere` child synced to the current radius and effective atmosphere thickness in both tool mode and runtime, and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
+- `PlanetRoot` now exposes `planet_radius`, `terrain_height_amplitude`, `sea_level_meters`, `water_enabled`, `hill_strength`, `mountain_strength`, `mountain_frequency`, `atmosphere_height` as a planet-radius fraction, `frustum_culling_enabled`, and `keep_coarse_lod_chunks_rendered` in the inspector, keeps the `PlanetAtmosphere` child synced to the current radius and effective atmosphere thickness in both tool mode and runtime, and draws a simple tool-time preview sphere in the editor so radius changes are visible before running the scene.
+- The runtime now creates one opaque visual-only water sphere at `planet_radius + sea_level_meters + 1% terrain_height_amplitude` when water is enabled. It is server-managed, two-sided to avoid winding/culling surprises, independent from chunk residency/collision, and rebound on origin shifts.
 - `PlanetRoot` now also derives the debug-player bootstrap distance from the configured planet scale at runtime and keeps the active camera near/far clip synced to the current camera-to-planet distance plus the atmosphere proxy cube bounds while capping far/near depth ratio, and the repository ships an inherited `scenes/main_300km.tscn` scene for headless large-planet boot validation.
 - The vendored `extremely_fast_atmosphere` shader now anchors its direction-profile lookup to a planet-space sample along the view ray instead of the camera-facing outer shell entry point, so the terminator and twilight colors remain fixed on the planet during orbital fly-bys without adding raymarching or per-pixel loops.
 - The default `MainCamera` far clip now ships at `100000.0`, which is `25x` the Godot `Camera3D.far` default of `4000.0` and leaves more headroom for the atmosphere shader's depth-limited sky pass on a `planet_radius = 10000` world, while larger runtime worlds now cap their bootstrap far clip to the actual initial view volume instead of multiplying the whole-planet scale by an arbitrary large constant.
@@ -58,6 +59,11 @@ Checked on 2026-04-04:
 
 - Godot stable `Camera3D` docs for `current` camera selection and the documented `far` culling boundary semantics.
 - godot-rust `Camera3D` API docs for the `get_far()` and `set_far()` binding behavior used by the runtime bootstrap.
+
+Checked on 2026-04-30:
+
+- Godot stable `RenderingServer` docs and godot-rust `RenderingServer` API docs for the documented water instance create/base/scenario/transform/visibility/free RID path.
+- godot-rust `StandardMaterial3D` API docs for the opaque water material parameter setters used by the visual-only sea sphere.
 
 Constraints carried into code:
 
@@ -97,6 +103,11 @@ DENSE_METADATA_PREBUILD_MAX_LOD = 8
 PAYLOAD_PRECOMPUTE_MAX_LOD      = 5
 QUADS_PER_EDGE                  = 32
 SAMPLED_EDGE                    = 35   // 33 visible + 2 border
+SEA_LEVEL_METERS                = 0.0
+WATER_ENABLED                   = true
+HILL_STRENGTH                   = 0.22
+MOUNTAIN_STRENGTH               = 0.32
+MOUNTAIN_FREQUENCY              = 27.0
 SPLIT_THRESHOLD_PX              = 8
 MERGE_THRESHOLD_PX              = 4
 HORIZON_SAFETY_MARGIN           = 16.0 radial slack units
@@ -218,6 +229,11 @@ Together with pool watermarks, these establish back-pressure behavior:
 - [x] Result summary: a scripted Retina/window-mode probe now exists in `scenes/profiling/perf_probe.tscn` and `scripts/profile_window_modes.sh`, and isolated runs on the default scene showed the fullscreen regression is dominated by higher LOD demand and commit backlog rather than the atmosphere pass. On the repository's macOS Retina display, the probe measured `small_window` at `1728 x 1116` / `120.0235 FPS`, `fullscreen_native` at `3456 x 2168` / `116.4759 FPS` with `avg_desired_render=327.9771` and `avg_deferred_commits=83.4478`, `fullscreen_fixed_lod` at the same fullscreen pixel size but with `lod_viewport_height_override_px=1116` / `119.9981 FPS` with `avg_desired_render=110.3889` and `avg_deferred_commits=1.6569`, `fullscreen_native_no_atmosphere` at `116.7438 FPS`, and `fullscreen_fixed_lod_no_atmosphere` at `120.0614 FPS`. Because these runs were near a `120 Hz` cap, the stronger signal was the `~3x` fullscreen jump in desired render chunks and the `~50x` jump in deferred commit backlog, not the raw FPS delta alone.
 - [x] Profiles and scenarios tested: `./scripts/build_rust.sh`; `./scripts/profile_window_modes.sh` on the default `res://scenes/main.tscn` content through the non-headless macOS Godot binary.
 - [x] Deviations from the earlier phase note: the new `world2/debug/lod_viewport_height_override` Project Setting is intentionally debug-only and exists to hold projected-error LOD selection constant during profiling; it is not part of the shipped gameplay tuning surface.
+- [x] Date: 2026-04-30
+- [x] Result summary: Added parameterized layered terrain defaults, `[height_norm, slope_hint, moisture, land_mask]` material tiles, below-sea asset rejection, and a visual-only opaque water sphere at `planet_radius + sea_level_meters + 1% terrain_height_amplitude`.
+- [x] Profiles and scenarios tested: `cargo fmt`; `cargo test` passed `96/96`; `./scripts/build_rust.sh`; `./scripts/run_godot.sh --headless --quit-after 5`; `./scripts/run_godot.sh --headless res://scenes/main_300km.tscn --quit-after 8`; `./scripts/profile_window_modes.sh`.
+- [x] Profiling observations: `small_window`, `fullscreen_native`, and `fullscreen_native_no_atmosphere` all settled at `avg_desired_render=172.0000`, `avg_active_gpu_render_chunks=172.0000`, `avg_deferred_commits=0.0000`, `avg_deferred_upload_mib=0.000000`, and about `120 FPS` on the local macOS run.
+- [x] 2026-04-30 visual-art follow-up: Replaced the initial trig/ridge terrain stack with smooth hashed 3D value-noise fBm to remove ring/dot/beehive artifacts, and made the water material two-sided with a small positive surface offset to avoid culling and depth-fighting. Re-ran `cargo fmt`, `cargo test` (`96/96`), `./scripts/build_rust.sh`, and both headless scene boots.
 
 ## References
 

@@ -95,11 +95,23 @@ void vertex() {
 
 void fragment() {
 	vec4 material_sample = texture(material_tile, tile_uv(v_chunk_uv));
-	vec3 lowland = vec3(0.18, 0.37, 0.17);
-	vec3 upland = vec3(0.47, 0.43, 0.30);
-	vec3 rocky = vec3(0.48, 0.48, 0.50);
-	vec3 biome_mix = mix(lowland, upland, clamp(material_sample.y, 0.0, 1.0));
-	ALBEDO = mix(biome_mix, rocky, clamp(material_sample.z, 0.0, 1.0));
+	float height_norm = clamp(material_sample.r, 0.0, 1.0);
+	float slope = clamp(material_sample.g, 0.0, 1.0);
+	float moisture = clamp(material_sample.b, 0.0, 1.0);
+	float land_mask = clamp(material_sample.a, 0.0, 1.0);
+	vec3 seabed = vec3(0.07, 0.16, 0.14);
+	vec3 beach = vec3(0.62, 0.55, 0.38);
+	vec3 grass_dry = vec3(0.25, 0.34, 0.18);
+	vec3 grass_wet = vec3(0.12, 0.32, 0.16);
+	vec3 upland = vec3(0.42, 0.39, 0.28);
+	vec3 rock = vec3(0.46, 0.46, 0.44);
+	vec3 snow = vec3(0.78, 0.80, 0.76);
+	vec3 lowland = mix(grass_dry, grass_wet, moisture);
+	vec3 base = mix(beach, lowland, smoothstep(0.50, 0.58, height_norm));
+	base = mix(base, upland, smoothstep(0.60, 0.78, height_norm));
+	base = mix(base, rock, max(smoothstep(0.16, 0.42, slope), smoothstep(0.74, 0.90, height_norm)));
+	base = mix(base, snow, smoothstep(0.88, 0.98, height_norm) * (1.0 - smoothstep(0.35, 0.70, moisture)));
+	ALBEDO = mix(seabed, base, land_mask);
 	ROUGHNESS = 0.96;
 	SPECULAR = 0.1;
 }

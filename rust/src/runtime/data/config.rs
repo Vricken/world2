@@ -27,6 +27,11 @@ pub struct RuntimeConfig {
     pub origin_recenter_distance: f64,
     pub planet_radius: f64,
     pub height_amplitude: f64,
+    pub sea_level_meters: f64,
+    pub water_enabled: bool,
+    pub hill_strength: f64,
+    pub mountain_strength: f64,
+    pub mountain_frequency: f64,
     pub render_lod_reference_height_px: f32,
     pub target_render_chunks: usize,
     pub hard_render_chunk_cap: usize,
@@ -68,6 +73,11 @@ impl RuntimeConfig {
         self.dense_metadata_prebuild_max_lod =
             self.dense_metadata_prebuild_max_lod.min(self.max_lod);
         self.payload_precompute_max_lod = self.payload_precompute_max_lod.min(self.max_lod);
+        self.planet_radius = self.planet_radius.max(1.0);
+        self.height_amplitude = self.height_amplitude.max(0.0);
+        self.hill_strength = self.hill_strength.max(0.0);
+        self.mountain_strength = self.mountain_strength.max(0.0);
+        self.mountain_frequency = self.mountain_frequency.max(f64::EPSILON);
         self.render_lod_reference_height_px = self.render_lod_reference_height_px.max(1.0);
         self.hard_render_chunk_cap = self.hard_render_chunk_cap.max(Face::ALL.len());
         self.target_render_chunks = self
@@ -110,6 +120,11 @@ impl Default for RuntimeConfig {
             origin_recenter_distance: DEFAULT_ORIGIN_RECENTER_DISTANCE,
             planet_radius: terrain.planet_radius,
             height_amplitude: terrain.height_amplitude,
+            sea_level_meters: terrain.sea_level_meters,
+            water_enabled: true,
+            hill_strength: terrain.hill_strength,
+            mountain_strength: terrain.mountain_strength,
+            mountain_frequency: terrain.mountain_frequency,
             render_lod_reference_height_px: DEFAULT_RENDER_LOD_REFERENCE_HEIGHT_PX,
             target_render_chunks: DEFAULT_TARGET_RENDER_CHUNKS,
             hard_render_chunk_cap: DEFAULT_HARD_RENDER_CHUNK_CAP,
@@ -134,6 +149,21 @@ impl Default for RuntimeConfig {
             physics_pool_watermark: DEFAULT_PHYSICS_POOL_WATERMARK,
             asset_placement_cells_per_axis: DEFAULT_ASSET_PLACEMENT_CELLS_PER_AXIS,
             asset_group_chunk_span: DEFAULT_ASSET_GROUP_CHUNK_SPAN,
+        }
+    }
+}
+
+impl RuntimeConfig {
+    pub fn terrain_settings(&self) -> TerrainFieldSettings {
+        let default = TerrainFieldSettings::default();
+        TerrainFieldSettings {
+            planet_radius: self.planet_radius,
+            height_amplitude: self.height_amplitude,
+            hill_strength: self.hill_strength,
+            mountain_strength: self.mountain_strength,
+            mountain_frequency: self.mountain_frequency,
+            sea_level_meters: self.sea_level_meters,
+            ..default
         }
     }
 }

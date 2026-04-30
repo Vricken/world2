@@ -2,7 +2,7 @@ extends CharacterBody3D
 
 @export var move_speed: float = 150.0
 @export var min_speed: float = 18.75
-@export var max_speed: float = 9600.0
+@export var max_speed: float = 96000.0
 @export var mouse_sensitivity: float = 0.0025
 
 @onready var pitch_pivot: Node3D = $PitchPivot

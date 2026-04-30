@@ -24,6 +24,7 @@ use godot::classes::physics_server_3d::{BodyMode, BodyState};
 use godot::classes::rendering_server::{MultimeshTransformFormat, PrimitiveType};
 use godot::classes::{
     ArrayMesh, Image, ImageTexture, PhysicsServer3D, RenderingServer, Shader, ShaderMaterial,
+    StandardMaterial3D,
 };
 use godot::meta::ToGodot;
 use godot::obj::{Gd, NewGd, Singleton};
@@ -301,6 +302,7 @@ pub struct PlanetRuntime {
     pub gpu_active_materials: HashMap<ChunkKey, GpuMaterialPoolEntry>,
     pub gpu_render_instance_pool: VecDeque<Rid>,
     pub terrain_shader: Option<Gd<Shader>>,
+    pub water_render: WaterRenderState,
     pub physics_pool: VecDeque<PhysicsPoolEntry>,
     pub asset_groups: HashMap<AssetGroupKey, AssetGroupState>,
     pub asset_family_meshes: HashMap<u16, Rid>,

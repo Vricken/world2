@@ -75,6 +75,60 @@ fn keys_intersect_hierarchically(a: ChunkKey, b: ChunkKey) -> bool {
     a.face == b.face && (a.is_descendant_of(&b) || b.is_descendant_of(&a))
 }
 
+fn build_unit_sphere_mesh(lat_segments: u32, lon_segments: u32) -> Gd<ArrayMesh> {
+    let lat_segments = lat_segments.max(4);
+    let lon_segments = lon_segments.max(8);
+    let mut positions = Vec::with_capacity(((lat_segments + 1) * (lon_segments + 1)) as usize);
+    let mut normals = Vec::with_capacity(positions.capacity());
+    let mut uvs = Vec::with_capacity(positions.capacity());
+    let mut indices = Vec::with_capacity((lat_segments * lon_segments * 6) as usize);
+
+    for lat in 0..=lat_segments {
+        let v = lat as f32 / lat_segments as f32;
+        let theta = v * std::f32::consts::PI;
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+        for lon in 0..=lon_segments {
+            let u = lon as f32 / lon_segments as f32;
+            let phi = u * std::f32::consts::TAU;
+            let normal = Vector3::new(sin_theta * phi.cos(), cos_theta, sin_theta * phi.sin());
+            positions.push(normal);
+            normals.push(normal);
+            uvs.push(Vector2::new(u, v));
+        }
+    }
+
+    let row = lon_segments + 1;
+    for lat in 0..lat_segments {
+        for lon in 0..lon_segments {
+            let i0 = (lat * row + lon) as i32;
+            let i1 = i0 + 1;
+            let i2 = (((lat + 1) * row) + lon) as i32;
+            let i3 = i2 + 1;
+            indices.extend_from_slice(&[i0, i1, i2, i1, i3, i2]);
+        }
+    }
+
+    let arrays = Array::from_iter([
+        PackedVector3Array::from_iter(positions).to_variant(),
+        PackedVector3Array::from_iter(normals).to_variant(),
+        Variant::nil(),
+        Variant::nil(),
+        PackedVector2Array::from_iter(uvs).to_variant(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        Variant::nil(),
+        PackedInt32Array::from_iter(indices).to_variant(),
+    ]);
+    let mut mesh = ArrayMesh::new_gd();
+    mesh.add_surface_from_arrays(godot::classes::mesh::PrimitiveType::TRIANGLES, &arrays);
+    mesh
+}
+
 impl PlanetRuntime {
     pub(crate) fn apply_budgeted_diffs(
         &mut self,
@@ -237,6 +291,7 @@ impl PlanetRuntime {
             .unwrap_or(0);
         self.update_selected_render_starvation(frame_state);
         self.sync_asset_groups(frame_state)?;
+        self.sync_water_render();
         self.trim_non_physics_collision_payloads(desired_physics);
         frame_state.render_residency_evictions += self.evict_render_residency_entries_to_limit(
             self.render_residency_soft_limit(desired_render.len()),
@@ -1217,6 +1272,94 @@ impl PlanetRuntime {
         }
     }
 
+    fn sync_water_render(&mut self) {
+        if !self.config.water_enabled {
+            self.release_water_render();
+            return;
+        }
+
+        let water_surface_offset = self.config.height_amplitude.max(1.0) * 0.01;
+        let water_radius =
+            (self.config.planet_radius + self.config.sea_level_meters + water_surface_offset)
+                .max(1.0);
+        if self.should_commit_to_servers() {
+            let mesh_rid = self.ensure_water_mesh().get_rid();
+            let material_rid = self.ensure_water_material().get_rid();
+            let instance_rid = match self.water_render.instance_rid {
+                Some(rid) => rid,
+                None => {
+                    let mut rendering_server = RenderingServer::singleton();
+                    let rid = rendering_server.instance_create();
+                    self.water_render.instance_rid = Some(rid);
+                    rid
+                }
+            };
+
+            let mut rendering_server = RenderingServer::singleton();
+            rendering_server.instance_set_base(instance_rid, mesh_rid);
+            rendering_server.instance_set_scenario(instance_rid, self.scenario_rid);
+            rendering_server
+                .instance_set_transform(instance_rid, self.water_transform(water_radius));
+            rendering_server.instance_set_surface_override_material(instance_rid, 0, material_rid);
+            rendering_server.instance_set_visible(instance_rid, true);
+        }
+
+        self.water_render.radius = water_radius;
+        self.water_render.active = true;
+    }
+
+    fn ensure_water_mesh(&mut self) -> Gd<ArrayMesh> {
+        if let Some(mesh) = self.water_render.mesh.clone() {
+            return mesh;
+        }
+
+        let mesh = build_unit_sphere_mesh(32, 64);
+        self.water_render.mesh = Some(mesh.clone());
+        mesh
+    }
+
+    fn ensure_water_material(&mut self) -> Gd<StandardMaterial3D> {
+        if let Some(material) = self.water_render.material.clone() {
+            return material;
+        }
+
+        let mut material = StandardMaterial3D::new_gd();
+        material.set_albedo(Color::from_rgba(0.02, 0.24, 0.42, 1.0));
+        material.set_metallic(0.0);
+        material.set_roughness(0.55);
+        material.set_cull_mode(godot::classes::base_material_3d::CullMode::DISABLED);
+        self.water_render.material = Some(material.clone());
+        material
+    }
+
+    fn water_transform(&self, water_radius: f64) -> Transform3D {
+        let scale = water_radius as f32;
+        Transform3D::new(
+            Basis::from_rows(
+                Vector3::new(scale, 0.0, 0.0),
+                Vector3::new(0.0, scale, 0.0),
+                Vector3::new(0.0, 0.0, scale),
+            ),
+            dvec3_to_vector3(-self.origin_snapshot.render_origin_planet),
+        )
+    }
+
+    fn release_water_render(&mut self) {
+        if self.should_commit_to_servers() {
+            if let Some(instance_rid) = self.water_render.instance_rid.take() {
+                let mut rendering_server = RenderingServer::singleton();
+                rendering_server.instance_set_visible(instance_rid, false);
+                rendering_server.free_rid(instance_rid);
+            }
+        } else {
+            self.water_render.instance_rid = None;
+        }
+        self.water_render.mesh = None;
+        self.water_render.material = None;
+        self.water_render.radius = 0.0;
+        self.water_render.active = false;
+    }
+
     fn chunk_custom_aabb(&self, bounds: ChunkBounds) -> Aabb {
         let radius = bounds.radius.max(1.0) as f32;
         Aabb::new(
@@ -1796,6 +1939,13 @@ impl PlanetRuntime {
                 );
                 frame_state.phase10_render_transform_rebinds += 1;
             }
+            if let Some(water_instance_rid) = self.water_render.instance_rid {
+                rendering_server.instance_set_transform(
+                    water_instance_rid,
+                    self.water_transform(self.water_render.radius.max(1.0)),
+                );
+                frame_state.phase10_render_transform_rebinds += 1;
+            }
 
             let mut physics_server = PhysicsServer3D::singleton();
             for key in &physics_keys {
@@ -1825,6 +1975,9 @@ impl PlanetRuntime {
                 }
             }
             frame_state.phase10_render_transform_rebinds += asset_groups.len();
+            if self.water_render.active {
+                frame_state.phase10_render_transform_rebinds += 1;
+            }
             for key in physics_keys {
                 if self.chunk_origin_planet_for_key(key).is_some() {
                     frame_state.phase10_physics_transform_rebinds += 1;
@@ -1904,6 +2057,14 @@ impl PlanetRuntime {
                     rendering_server.free_rid(mesh_rid);
                 }
             }
+            if let Some(water_instance_rid) = self.water_render.instance_rid.take() {
+                rendering_server.instance_set_visible(water_instance_rid, false);
+                rendering_server.free_rid(water_instance_rid);
+            }
+            self.water_render.mesh = None;
+            self.water_render.material = None;
+            self.water_render.radius = 0.0;
+            self.water_render.active = false;
         } else {
             for payload in self.resident_payloads.values_mut() {
                 payload.pooled_render_entry = None;
@@ -1930,6 +2091,7 @@ impl PlanetRuntime {
             self.physics_pool.clear();
             self.asset_groups.clear();
             self.asset_family_meshes.clear();
+            self.water_render = WaterRenderState::default();
         }
 
         self.active_render.clear();

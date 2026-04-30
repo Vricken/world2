@@ -21,6 +21,11 @@ impl PlanetRoot {
         RuntimeConfig {
             planet_radius: self.planet_radius.max(1.0),
             height_amplitude: self.terrain_height_amplitude.max(0.0),
+            sea_level_meters: self.sea_level_meters,
+            water_enabled: self.water_enabled,
+            hill_strength: self.hill_strength.max(0.0),
+            mountain_strength: self.mountain_strength.max(0.0),
+            mountain_frequency: self.mountain_frequency.max(f64::EPSILON),
             max_lod_cap: Self::project_max_lod_cap(),
             metadata_precompute_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,
             dense_metadata_prebuild_max_lod: DEFAULT_DENSE_METADATA_PREBUILD_MAX_LOD,

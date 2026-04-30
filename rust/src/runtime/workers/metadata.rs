@@ -168,11 +168,7 @@ fn build_chunk_meta_for_config(
         .copied()
         .fold(DVec3::ZERO, |sum, dir| sum + dir)
         .normalize_or_zero();
-    let terrain = TerrainFieldSettings {
-        planet_radius: config.planet_radius,
-        height_amplitude: config.height_amplitude,
-        ..TerrainFieldSettings::default()
-    };
+    let terrain = config.terrain_settings();
     let center_planet = center_dir * config.planet_radius;
 
     let angular_radius = sample_dirs

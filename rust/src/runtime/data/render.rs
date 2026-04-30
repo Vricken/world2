@@ -21,6 +21,15 @@ pub struct CanonicalRenderMeshEntry {
     pub mesh: Option<Gd<ArrayMesh>>,
 }
 
+#[derive(Debug, Default)]
+pub struct WaterRenderState {
+    pub mesh: Option<Gd<ArrayMesh>>,
+    pub material: Option<Gd<StandardMaterial3D>>,
+    pub instance_rid: Option<Rid>,
+    pub radius: f64,
+    pub active: bool,
+}
+
 #[derive(Debug)]
 pub struct GpuMaterialPoolEntry {
     pub surface_class: SurfaceClassKey,

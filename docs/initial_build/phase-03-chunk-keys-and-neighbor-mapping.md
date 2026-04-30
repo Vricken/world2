@@ -96,7 +96,8 @@ Current epsilon policy:
 
 Deviation note:
 
-- The phase now uses a deterministic analytic 3D harmonic field as the default displacement signal. This preserves the intended seam-safe 3D planet-space domain without adding a separate noise crate before the later mesh-generation phases.
+- The phase now uses a deterministic analytic 3D field as the default displacement signal. The current field is parameterized in `TerrainFieldSettings` and layers continent, hill, mountain ridge, and detail signals in 3D planet space without adding a noise crate.
+- The same `RuntimeConfig::terrain_settings()` source feeds metadata bounds, render payload workers, test sampling, and asset placement. This avoids divergent terrain math between selection, rendering, collision derivation, and placement filters.
 
 ## Checklist
 

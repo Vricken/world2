@@ -64,7 +64,7 @@ Phase 03 was implemented with the documented Phase 02 manual fast-traversal visu
 
 - Tile resolution is fixed at `35 x 35`, matching `SAMPLED_VERTICES_PER_EDGE` and preserving the one-quad seam-safe border ring around the visible `33 x 33` vertex grid.
 - `height_tile` stores terrain height offsets in meters relative to the configured base planet radius. Consumers reconstruct displaced positions by sampling this tile in chunk-local sample space.
-- `material_tile`, when present, stores `[biome0, biome1, slope_hint, 1.0]` per sample. This matches the current CPU color payload and gives Phase 04 shader code a stable material-mask contract.
+- `material_tile`, when present, stores `[height_norm, slope_hint, moisture, land_mask]` per sample. This matches the CPU color payload and gives the Phase 04 shader a stable material contract for beach, vegetation, upland, rock, snow, and below-sea shading.
 - `normal_tile` is not populated in Phase 03. Any shader path consuming the tile payload before Phase 04 normal support lands must derive normals from neighboring height samples or fall back to the existing CPU mesh normals.
 - Tile-slot ids are stable only while a chunk payload remains resident. Once a payload is evicted, its slot may be recycled for a different chunk, so Phase 04 resource binding must treat slot reuse as normal behavior.
 

@@ -21,7 +21,7 @@ Implemented on 2026-03-22 in:
 What shipped:
 
 - Deterministic chunk-local asset placement now runs during payload preparation, using the required hash inputs `(planet_seed, chunk_key, cell_id, family_id)` to derive one candidate per placement cell and family.
-- Candidate projection samples the same documented cube-sphere terrain field used by chunk generation, then applies deterministic biome, slope, curvature, altitude, procedural mask, and exclusion-radius filters before storing accepted transforms in `ChunkPayload.assets`.
+- Candidate projection samples the same documented cube-sphere terrain field used by chunk generation, then applies deterministic moisture, height, slope, curvature, altitude, procedural mask, below-sea, and exclusion-radius filters before storing accepted transforms in `ChunkPayload.assets`.
 - Asset residency is now bound to the active render chunk set instead of scene-tree callbacks, and accepted instances remain chunk-owned even when grouped later for rendering.
 - Repeated assets now render through compact `RenderingServer` multimeshes keyed by `(face, lod, chunk_group, asset_family)` with a fixed `2 x 2` chunk batch policy, custom group AABBs, and one shared low-poly family mesh RID per asset family.
 - Origin-rebind and teardown paths now include asset multimesh instances, and `PlanetRoot` logs/exported counters expose active asset group and instance totals during headless validation.

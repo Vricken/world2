@@ -65,6 +65,34 @@ impl PlanetRoot {
         let current_far = f64::from(camera.get_far());
         let current_near = f64::from(camera.get_near());
         let far_near_ratio = current_far / current_near.max(1.0e-6);
+        let terrain = self.runtime.config.terrain_settings();
+        let terrain_probe = if camera_planet.length_squared() > f64::EPSILON {
+            let unit_dir = camera_planet.normalize();
+            let sample = terrain.sample(unit_dir);
+            let surface_radius = self.runtime.config.planet_radius + sample.height;
+            let camera_altitude = camera_planet.length() - surface_radius;
+            format!(
+                "terrain radius={:.1} amp={:.1} sea={:.1} water_r={:.1}\n\
+                 nadir height={:.1} above_sea={:.1} land={:.2} moisture={:.2} camera_alt={:.1}\n\
+                 hills={:.2} mountains={:.2} mountain_freq={:.2}",
+                self.runtime.config.planet_radius,
+                self.runtime.config.height_amplitude,
+                self.runtime.config.sea_level_meters,
+                self.runtime.config.planet_radius
+                    + self.runtime.config.sea_level_meters
+                    + self.runtime.config.height_amplitude.max(1.0) * 0.01,
+                sample.height,
+                sample.height - self.runtime.config.sea_level_meters,
+                sample.land_mask,
+                sample.moisture,
+                camera_altitude,
+                self.runtime.config.hill_strength,
+                self.runtime.config.mountain_strength,
+                self.runtime.config.mountain_frequency
+            )
+        } else {
+            "terrain probe unavailable: camera at planet center".to_string()
+        };
         let viewport_size = self
             .base()
             .get_viewport()
@@ -79,6 +107,7 @@ impl PlanetRoot {
                 "camera_scene={} dist_scene_origin={:.3}m\n",
                 "origin_planet={} planet_center_scene={}\n",
                 "camera_planet={} dist_planet_center={:.3}m\n",
+                "{}\n",
                 "camera near={:.4} target_near={:.4} far={:.3} target_far={:.3} far/near={:.1}\n",
                 "render desired={} active={} deferred_ops={} deferred_upload={:.3}MiB\n",
                 "origin_mode={} large_world_coordinates={}"
@@ -94,6 +123,7 @@ impl PlanetRoot {
             format_dvec3(planet_center_scene),
             format_dvec3(camera_planet),
             camera_planet.length(),
+            terrain_probe,
             current_near,
             target_near,
             current_far,

@@ -219,11 +219,7 @@ impl PlanetRuntime {
             .copied()
             .fold(DVec3::ZERO, |sum, dir| sum + dir)
             .normalize_or_zero();
-        let terrain = TerrainFieldSettings {
-            planet_radius: self.config.planet_radius,
-            height_amplitude: self.config.height_amplitude,
-            ..TerrainFieldSettings::default()
-        };
+        let terrain = self.config.terrain_settings();
         let center_planet = center_dir * self.config.planet_radius;
 
         let angular_radius = sample_dirs
@@ -324,6 +320,7 @@ impl PlanetRuntime {
         let samples_per_edge = mesh_topology::SAMPLED_VERTICES_PER_EDGE;
         let visible_quads = f64::from(mesh_topology::QUADS_PER_EDGE);
         let border = f64::from(mesh_topology::BORDER_RING_QUADS);
+        let terrain = self.config.terrain_settings();
         let mut samples = Vec::with_capacity((samples_per_edge * samples_per_edge) as usize);
 
         for y in 0..samples_per_edge {
@@ -339,24 +336,18 @@ impl PlanetRuntime {
                     .config
                     .cube_projection
                     .project(normalize_to_cube_surface(cube_point));
-                let height = self
-                    .terrain_settings()
-                    .sample_height(unit_dir)
+                let terrain_sample = terrain.sample(unit_dir);
+                let height = terrain_sample
+                    .height
                     .clamp(-self.config.height_amplitude, self.config.height_amplitude)
                     as f32;
-                let temperature = (1.0 - unit_dir.y.abs()) as f32;
-                let moisture_signal =
-                    (unit_dir.dot(DVec3::new(1.731, -0.613, 0.947)).sin() * 0.5 + 0.5) as f32;
-                let biome0 = moisture_signal.clamp(0.0, 1.0);
-                let biome1 = ((temperature * 0.75)
-                    + ((height / self.config.height_amplitude as f32) * 0.25 + 0.25))
-                    .clamp(0.0, 1.0);
 
                 samples.push(ChunkSample {
                     unit_dir,
                     height,
-                    biome0,
-                    biome1,
+                    height_norm: terrain_sample.height_norm,
+                    moisture: terrain_sample.moisture,
+                    land_mask: terrain_sample.land_mask,
                     slope_hint: 0.0,
                 });
             }
@@ -452,8 +443,12 @@ impl PlanetRuntime {
                     x as f32 / mesh_topology::QUADS_PER_EDGE as f32,
                     y as f32 / mesh_topology::QUADS_PER_EDGE as f32,
                 ]);
-                mesh.colors
-                    .push([sample.biome0, sample.biome1, sample.slope_hint, 1.0]);
+                mesh.colors.push([
+                    sample.height_norm,
+                    sample.slope_hint,
+                    sample.moisture,
+                    sample.land_mask,
+                ]);
             }
         }
 
@@ -995,15 +990,6 @@ impl PlanetRuntime {
         }
 
         Ok(physics)
-    }
-
-    #[cfg(test)]
-    fn terrain_settings(&self) -> TerrainFieldSettings {
-        TerrainFieldSettings {
-            planet_radius: self.config.planet_radius,
-            height_amplitude: self.config.height_amplitude,
-            ..TerrainFieldSettings::default()
-        }
     }
 
     pub(crate) fn required_surface_class_for_selection(

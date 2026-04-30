@@ -472,6 +472,20 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     assert_eq!(config.dense_metadata_prebuild_max_lod, 5);
     assert_eq!(config.payload_precompute_max_lod, 5);
     assert_eq!(config.metadata_precompute_max_lod, 5);
+    assert_eq!(config.sea_level_meters, 0.0);
+    assert!(config.water_enabled);
+    assert_eq!(
+        config.hill_strength,
+        TerrainFieldSettings::default().hill_strength
+    );
+    assert_eq!(
+        config.mountain_strength,
+        TerrainFieldSettings::default().mountain_strength
+    );
+    assert_eq!(
+        config.mountain_frequency,
+        TerrainFieldSettings::default().mountain_frequency
+    );
     assert!(config.enable_frustum_culling);
     assert!(!config.keep_coarse_lod_chunks_rendered);
     assert_eq!(
@@ -535,6 +549,75 @@ fn phase13_default_runtime_config_matches_documented_starting_values() {
     assert!(config.physics_pool_watermark < config.render_pool_watermark_per_class);
     assert!((1..=DEFAULT_MAX_WORKER_THREADS).contains(&config.worker_thread_count));
     assert_eq!(runtime.worker_thread_count(), config.worker_thread_count);
+}
+
+#[test]
+fn terrain_field_is_deterministic_and_clamped() {
+    let terrain = RuntimeConfig::default().terrain_settings();
+    let directions = [
+        DVec3::new(1.0, 0.0, 0.0),
+        DVec3::new(0.2, 0.9, -0.3).normalize(),
+        DVec3::new(-0.4, 0.1, 0.8).normalize(),
+        DVec3::new(0.5, -0.7, 0.2).normalize(),
+    ];
+
+    for direction in directions {
+        let a = terrain.sample(direction);
+        let b = terrain.sample(direction);
+        assert_eq!(a, b);
+        assert!(a.height >= -terrain.height_amplitude);
+        assert!(a.height <= terrain.height_amplitude);
+        assert!((0.0..=1.0).contains(&a.height_norm));
+        assert!((0.0..=1.0).contains(&a.moisture));
+        assert!((0.0..=1.0).contains(&a.land_mask));
+    }
+}
+
+#[test]
+fn terrain_mountain_parameters_raise_peak_heights_above_hills_only() {
+    let hills_only = RuntimeConfig {
+        mountain_strength: 0.0,
+        ..RuntimeConfig::default()
+    }
+    .terrain_settings();
+    let mountains = RuntimeConfig {
+        mountain_strength: 0.85,
+        ..RuntimeConfig::default()
+    }
+    .terrain_settings();
+    let mut hill_peak = f64::NEG_INFINITY;
+    let mut mountain_peak = f64::NEG_INFINITY;
+
+    for face in Face::ALL {
+        for y in 0..=12 {
+            for x in 0..=12 {
+                let face_uv = DVec2::new(x as f64 / 12.0, y as f64 / 12.0);
+                let dir = CubeProjection::Spherified.project_cube_point(cube_point_for_face(
+                    face,
+                    face_uv_to_signed_coords(face_uv),
+                ));
+                hill_peak = hill_peak.max(hills_only.sample_height(dir));
+                mountain_peak = mountain_peak.max(mountains.sample_height(dir));
+            }
+        }
+    }
+
+    assert!(mountain_peak > hill_peak + mountains.height_amplitude * 0.08);
+}
+
+#[test]
+fn terrain_land_mask_follows_configured_sea_level() {
+    let terrain = RuntimeConfig {
+        sea_level_meters: 10.0,
+        ..RuntimeConfig::default()
+    }
+    .terrain_settings();
+
+    assert_eq!(terrain.land_mask_for_height(9.0), 0.0);
+    assert_eq!(
+        terrain.land_mask_for_height(10.0 + terrain.height_amplitude * 0.03),
+        1.0
+    );
 }
 
 #[test]
@@ -1373,6 +1456,21 @@ fn phase12_chunk_asset_placement_replays_for_same_seed() {
 }
 
 #[test]
+fn phase12_asset_placement_rejects_below_configured_sea_level() {
+    let config = RuntimeConfig {
+        planet_seed: 42,
+        sea_level_meters: RuntimeConfig::default().height_amplitude + 10.0,
+        ..RuntimeConfig::default()
+    };
+    let key = ChunkKey::new(Face::Px, 3, 1, 1);
+    let placement = build_chunk_asset_placement(&config, key);
+
+    assert!(placement.candidate_count > 0);
+    assert_eq!(placement.assets.len(), 0);
+    assert_eq!(placement.rejected_count, placement.candidate_count);
+}
+
+#[test]
 fn phase12_asset_grouping_stays_compact_within_chunk_batches() {
     let span = DEFAULT_ASSET_GROUP_CHUNK_SPAN;
     let key_a = ChunkKey::new(Face::Px, 3, 0, 0);
@@ -1932,7 +2030,12 @@ fn phase3_render_tile_matches_selected_chunk_scalar_field_samples() {
             assert_eq!(payload.render_tile.height_at(x, y), sample.height);
             assert_eq!(
                 material_tile[index],
-                [sample.biome0, sample.biome1, sample.slope_hint, 1.0]
+                [
+                    sample.height_norm,
+                    sample.slope_hint,
+                    sample.moisture,
+                    sample.land_mask
+                ]
             );
         }
     }
@@ -2545,6 +2648,40 @@ fn flush_pending_origin_rebinds_rebinds_active_transforms_immediately() {
     assert_eq!(runtime.frame_state.phase10_origin_rebases, 1);
     assert_eq!(runtime.frame_state.phase10_render_transform_rebinds, 1);
     assert_eq!(runtime.frame_state.phase10_physics_transform_rebinds, 1);
+}
+
+#[test]
+fn water_render_state_tracks_sea_level_and_origin_rebinds_without_server_rids() {
+    let mut runtime = PlanetRuntime::new(
+        RuntimeConfig {
+            sea_level_meters: 7.5,
+            enable_godot_staging: false,
+            ..RuntimeConfig::default()
+        },
+        Rid::Invalid,
+        Rid::Invalid,
+    );
+    let camera = orbit_camera_state();
+
+    runtime.step_visibility_selection(&camera).unwrap();
+    assert!(runtime.water_render.active);
+    assert_eq!(
+        runtime.water_render.radius,
+        runtime.config.planet_radius
+            + runtime.config.sea_level_meters
+            + runtime.config.height_amplitude * 0.01
+    );
+    assert!(runtime.water_render.instance_rid.is_none());
+
+    runtime.active_render.clear();
+    assert!(runtime.update_origin_from_camera(DVec3::new(2_048.0, 0.0, 0.0)));
+    runtime.flush_pending_origin_rebinds();
+    assert_eq!(runtime.frame_state.phase10_render_transform_rebinds, 1);
+
+    runtime.config.water_enabled = false;
+    runtime.step_visibility_selection(&camera).unwrap();
+    assert!(!runtime.water_render.active);
+    assert_eq!(runtime.water_render.radius, 0.0);
 }
 
 #[test]

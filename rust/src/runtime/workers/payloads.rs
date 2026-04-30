@@ -528,13 +528,7 @@ fn sample_chunk_scalar_field_into(
     let visible_quads_recip = 1.0 / f64::from(mesh_topology::QUADS_PER_EDGE);
     let border = f64::from(mesh_topology::BORDER_RING_QUADS);
     let height_amplitude = config.height_amplitude;
-    let height_amplitude_f32 = height_amplitude as f32;
-    let moisture_axis = DVec3::new(1.731, -0.613, 0.947);
-    let terrain = TerrainFieldSettings {
-        planet_radius: config.planet_radius,
-        height_amplitude,
-        ..TerrainFieldSettings::default()
-    };
+    let terrain = config.terrain_settings();
 
     for y in 0..samples_per_edge {
         for x in 0..samples_per_edge {
@@ -548,24 +542,17 @@ fn sample_chunk_scalar_field_into(
             let unit_dir = config
                 .cube_projection
                 .project(normalize_to_cube_surface(cube_point));
-            let height = terrain
-                .sample_height(unit_dir)
+            let terrain_sample = terrain.sample(unit_dir);
+            let height = terrain_sample
+                .height
                 .clamp(-height_amplitude, height_amplitude) as f32;
-            let temperature = (1.0 - unit_dir.y.abs()) as f32;
-            let moisture_signal = (unit_dir.dot(moisture_axis).sin() * 0.5 + 0.5) as f32;
-            let biome0 = moisture_signal.clamp(0.0, 1.0);
-            let height_ratio = if height_amplitude_f32 <= f32::EPSILON {
-                0.0
-            } else {
-                height / height_amplitude_f32
-            };
-            let biome1 = ((temperature * 0.75) + (height_ratio * 0.25 + 0.25)).clamp(0.0, 1.0);
 
             scratch.samples.push(ChunkSample {
                 unit_dir,
                 height,
-                biome0,
-                biome1,
+                height_norm: terrain_sample.height_norm,
+                moisture: terrain_sample.moisture,
+                land_mask: terrain_sample.land_mask,
                 slope_hint: 0.0,
             });
         }
@@ -651,8 +638,12 @@ fn derive_cpu_mesh_buffers_into(
                 1.0,
             ]);
             mesh.uvs.push([x as f32 * uv_scale, y as f32 * uv_scale]);
-            mesh.colors
-                .push([sample.biome0, sample.biome1, sample.slope_hint, 1.0]);
+            mesh.colors.push([
+                sample.height_norm,
+                sample.slope_hint,
+                sample.moisture,
+                sample.land_mask,
+            ]);
         }
     }
 }

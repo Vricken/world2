@@ -46,6 +46,16 @@ pub struct PlanetRoot {
     #[export]
     terrain_height_amplitude: f64,
     #[export]
+    sea_level_meters: f64,
+    #[export]
+    water_enabled: bool,
+    #[export]
+    hill_strength: f64,
+    #[export]
+    mountain_strength: f64,
+    #[export]
+    mountain_frequency: f64,
+    #[export]
     atmosphere_height: f64,
     #[export]
     frustum_culling_enabled: bool,
@@ -294,6 +304,43 @@ impl PlanetRoot {
     #[func]
     fn runtime_render_lod_reference_height_px(&self) -> f64 {
         f64::from(self.runtime.config.render_lod_reference_height_px)
+    }
+
+    #[func]
+    fn runtime_terrain_height_amplitude(&self) -> f64 {
+        self.runtime.config.height_amplitude
+    }
+
+    #[func]
+    fn runtime_sea_level_meters(&self) -> f64 {
+        self.runtime.config.sea_level_meters
+    }
+
+    #[func]
+    fn runtime_water_radius(&self) -> f64 {
+        self.runtime.config.planet_radius
+            + self.runtime.config.sea_level_meters
+            + self.runtime.config.height_amplitude.max(1.0) * 0.01
+    }
+
+    #[func]
+    fn runtime_terrain_height_at_camera_nadir(&self) -> f64 {
+        let Some(raw) = self.acquire_raw_camera_state() else {
+            return 0.0;
+        };
+        let origin = raw.transform.origin;
+        let camera_planet = glam::DVec3::new(
+            f64::from(origin.x),
+            f64::from(origin.y),
+            f64::from(origin.z),
+        ) + self.runtime.origin_snapshot().render_origin_planet;
+        if camera_planet.length_squared() <= f64::EPSILON {
+            return 0.0;
+        }
+        self.runtime
+            .config
+            .terrain_settings()
+            .sample_height(camera_planet.normalize())
     }
 
     #[func]
